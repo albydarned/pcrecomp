@@ -77,7 +77,7 @@ UNDEFINED = {
 }
 # Shifts and rotates define OF only for a count of exactly 1. A `, cl` form's
 # count is not known until it runs, so OF is not compared there.
-SHIFTS = ('shl', 'shr', 'sal', 'sar', 'rol', 'ror', 'rcl', 'rcr')
+SHIFTS = ('shl', 'shr', 'sal', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld', 'shrd')
 
 
 def undefined_flags(text):

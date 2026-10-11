@@ -171,6 +171,10 @@ versions follow [SemVer](https://semver.org/).
   runtime gap). `HLE_FILETRACE=1` logs the data files a title opens. (#45)
 
 ### Fixed
+- lift16: `rcl`/`rcr` on a dword built the 33-bit value in 32 bits and lost
+  the carry; `rcr eax, 1` was garbage. Microsoft Space Simulator's Kepler
+  solver never converged. difftest16 no longer compares OF after
+  `shld`/`shrd` with a count other than 1. (#88)
 - lift32: `repz ret` (F3 C3) lifts as a `ret`, and generate.py's extent walk
   ends a body at it. It was UNIMPLEMENTED, so MSVC 2005's
   `__security_check_cookie` fell through into `__report_gsfailure` and every

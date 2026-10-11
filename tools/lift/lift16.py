@@ -662,7 +662,10 @@ class Lifter:
                     f'| ({ofbit} ? FLAG_OF : 0); '
                     f'{_write(op1, "_r")} }} }}', orig)
             else:
-                # Rotate through carry; modulus is width+1 (the CF bit).
+                # Rotate through carry; modulus is width+1 (the CF bit). The
+                # operand and CF together are w+1 bits -- 33 for a dword, so
+                # the working value is 64-bit: in a uint32_t the carry bit
+                # fell off the top and `rcr eax, 1` came out as garbage.
                 m1 = w + 1
                 full = (1 << m1) - 1
                 cbit = 1 << w
@@ -674,8 +677,8 @@ class Lifter:
                 self._emit(
                     f'{{ {ut} _v = ({ut}){r}; uint8_t _n = ({cnt}) & 0x1F; '
                     f'if (_n) {{ uint8_t _c = _n % {m1}; '
-                    f'uint32_t _val = (uint32_t)_v | (cf(cpu) ? {cbit}u : 0u); '
-                    f'uint32_t _r = ({rotexpr}) & {full}u; '
+                    f'uint64_t _val = (uint64_t)_v | (cf(cpu) ? 0x{cbit:X}ull : 0ull); '
+                    f'uint64_t _r = ({rotexpr}) & 0x{full:X}ull; '
                     f'cpu->flags = (cpu->flags & ~(FLAG_CF | FLAG_OF)) | (((_r >> {w}) & 1) ? FLAG_CF : 0) '
                     f'| ({ofbit} ? FLAG_OF : 0); '
                     f'{_write(op1, f"({ut})_r")} }} }}', orig)
