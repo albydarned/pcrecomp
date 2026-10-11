@@ -72,6 +72,8 @@ UNDEFINED = {
     # bit tests define CF and nothing else
     'bt': set(FLAGS) - {'CF'}, 'bts': set(FLAGS) - {'CF'},
     'btr': set(FLAGS) - {'CF'}, 'btc': set(FLAGS) - {'CF'},
+    # bit scans define ZF and nothing else
+    'bsf': set(FLAGS) - {'ZF'}, 'bsr': set(FLAGS) - {'ZF'},
 }
 # Shifts and rotates define OF only for a count of exactly 1. A `, cl` form's
 # count is not known until it runs, so OF is not compared there.

@@ -1116,6 +1116,19 @@ class Lifter:
             cc = 'cc_' + m[3:]
             self._emit(_write(op1, f'({cc}(cpu) ? 1 : 0)'), orig)
 
+        elif m in ('bsf', 'bsr'):
+            # Index of the lowest (bsf) or highest (bsr) set bit. A zero source
+            # sets ZF and leaves the destination alone -- what every 386 and
+            # later does, though Intel calls it undefined; the code that uses
+            # it (normalising a fixed-point value) tests ZF first. The other
+            # flags are undefined and are left as they were.
+            w = int(_wsz(op1))
+            scan = (f'for (_i = {w - 1}; !((_s >> _i) & 1); _i--);' if m == 'bsr'
+                    else 'for (_i = 0; !((_s >> _i) & 1); _i++);')
+            self._emit(f'{{ uint{w}_t _s = (uint{w}_t)({_read(op2)}); int _i; '
+                       f'if (!_s) cpu->flags |= FLAG_ZF; '
+                       f'else {{ cpu->flags &= ~FLAG_ZF; {scan} {_write(op1, "_i")} }} }}', orig)
+
         elif m in ('bt', 'bts', 'btr', 'btc'):
             w = _wsz(op1)
             val = _read(op1)

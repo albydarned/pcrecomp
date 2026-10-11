@@ -17,6 +17,10 @@ versions follow [SemVer](https://semver.org/).
   table after the unpacker's message. `test_unexepack.py` packs its own
   files. Found on Microsoft Space Simulator's 19 install-time data
   generators. (#86)
+- decode16/lift16: `bsf` and `bsr` (they decoded as `db 0xF`, stopping the
+  walk). difftest16 compares only ZF and the destination after them, as the
+  manual defines. 42 pairs agree with Unicorn on Microsoft Space Simulator.
+  (#87)
 - dos32: builds and runs on Linux with gcc or clang, from the same source. The
   Win32 it used (the 4 GB reservation, locks, the clock, the fault handler, the
   CRT's file calls) has POSIX stand-ins, and guest paths match names on disk
