@@ -1617,4 +1617,44 @@ class Lifter:
 
         self.output.append('}')
 
+        if getattr(self, 'unwind_sp', False):
+            self._add_unwind_checks()
         return '\n'.join(self.output)
+
+    _CALL_RE = None
+
+    def _add_unwind_checks(self):
+        """Return as soon as a callee has unwound the guest stack past us.
+
+        Assembly that bails out of deep nesting does it by resetting SP:
+        save it on the way in (`mov [saved], sp`), and from anywhere below
+        `mov sp, [saved] / ret`. On the CPU that one ret leaves every frame
+        in between. Lifted, each guest frame is a C frame, and the ret only
+        leaves the innermost one; the rest carry on with a stack that no
+        longer holds what they pushed. (Microsoft Space Simulator's SMDL
+        model interpreter aborts this way, and without this it reports
+        "Bad SMDL Opcode" and jumps to garbage.)
+
+        So each function notes SP at entry -- pointing at its own return
+        address -- and after every call checks it: if SP is now above that,
+        on the same stack, its frame is gone and it returns too. Calls that
+        balance the stack never trip it; only an unwind does. Opt-in
+        (Lifter.unwind_sp): one compare per call site."""
+        import re
+        if Lifter._CALL_RE is None:
+            Lifter._CALL_RE = re.compile(
+                r'\b(fn_[0-9A-Fa-f]+|res_[0-9A-Fa-f]+|resn_[0-9A-Fa-f]+|far_[0-9A-Fa-f_]+'
+                r'|ovl[0-9A-Fa-f_]+|dispatch_near|dispatch_far)\(cpu')
+        out = []
+        for line in self.output:
+            out.append(line)
+            if line.startswith('    RECOMP_ENTER('):
+                out.append('    uint16_t _sp0 = cpu->sp, _ss0 = cpu->ss;')
+                continue
+            code = line.split('/*')[0]
+            if (Lifter._CALL_RE.search(code) and 'return;' not in code
+                    and not code.lstrip().startswith('void ')):
+                pad = line[:len(line) - len(line.lstrip())]
+                out.append(f'{pad}if (cpu->ss == _ss0 && (int16_t)(cpu->sp - _sp0) > 0) return; '
+                           f'/* a callee unwound past this frame */')
+        self.output = out

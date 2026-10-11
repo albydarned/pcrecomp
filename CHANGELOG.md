@@ -21,6 +21,10 @@ versions follow [SemVer](https://semver.org/).
   walk). difftest16 compares only ZF and the destination after them, as the
   manual defines. 42 pairs agree with Unicorn on Microsoft Space Simulator.
   (#87)
+- lift16: `Lifter.unwind_sp`, return from every lifted function whose frame
+  the guest unwound past (`mov sp, [saved] / ret` from deep inside), checked
+  after each call. Microsoft Space Simulator's SMDL interpreter aborts this
+  way. Opt-in. (#90)
 - dos32: builds and runs on Linux with gcc or clang, from the same source. The
   Win32 it used (the 4 GB reservation, locks, the clock, the fault handler, the
   CRT's file calls) has POSIX stand-ins, and guest paths match names on disk
