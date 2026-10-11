@@ -514,42 +514,53 @@ class Lifter:
                            f'((uint32_t)_r != (uint32_t)(int32_t)(int16_t)_r ? '
                            f'FLAG_CF|FLAG_OF : 0); }}', orig)
 
-        elif m == 'div':
-            if _wsz(op1) == '32':
+        elif m in ('div', 'idiv'):
+            # A divide faults (INT 0) on a zero divisor AND when the quotient
+            # does not fit the destination -- a game that installs its own INT
+            # 0 handler counts on both: Microsoft Space Simulator's saturates
+            # the quotient and skips the instruction. Before the call to
+            # DIV0_FN, cpu->cs:ip is set to the faulting instruction, so a
+            # runtime can give the handler the frame the CPU would have.
+            # (In C an overflowing quotient is truncated or, for INT64_MIN/-1,
+            # kills the host process.)
+            ip = inst.address & 0xFFFF
+            fault = f'{{ cpu->cs = {_cseg()}; cpu->ip = 0x{ip:04X}; {DIV0_FN}("{m}{_wsz(op1) if op1.size != 1 and op1.type != OpType.REG8 else "8"}"); }}'
+            if m == 'div' and _wsz(op1) == '32':
                 self._emit(f'{{ uint64_t _n = ((uint64_t)cpu->edx << 32) | cpu->eax; '
                            f'uint32_t _d = (uint32_t){_read(op1)}; '
-                           f'if (_d) {{ cpu->eax = (uint32_t)(_n / _d); '
-                           f'cpu->edx = (uint32_t)(_n % _d); }} else {DIV0_FN}("div32"); }}', orig)
-            elif op1.size == 1 or op1.type == OpType.REG8:
+                           f'if (_d && _n / _d <= 0xFFFFFFFFull) {{ cpu->eax = (uint32_t)(_n / _d); '
+                           f'cpu->edx = (uint32_t)(_n % _d); }} else {fault} }}', orig)
+            elif m == 'div' and (op1.size == 1 or op1.type == OpType.REG8):
                 self._emit(f'{{ uint16_t _n = cpu->ax; uint8_t _d = {_read(op1)}; '
-                           f'if (_d) {{ cpu->al = (uint8_t)(_n / _d); '
-                           f'cpu->ah = (uint8_t)(_n % _d); }} else {DIV0_FN}("div8"); }}', orig)
-            else:
+                           f'if (_d && _n / _d <= 0xFF) {{ cpu->al = (uint8_t)(_n / _d); '
+                           f'cpu->ah = (uint8_t)(_n % _d); }} else {fault} }}', orig)
+            elif m == 'div':
                 self._emit(f'{{ uint32_t _n = ((uint32_t)cpu->dx << 16) | cpu->ax; '
                            f'uint16_t _d = {_read(op1)}; '
-                           f'if (_d) {{ cpu->ax = (uint16_t)(_n / _d); '
-                           f'cpu->dx = (uint16_t)(_n % _d); }} else {DIV0_FN}("div16"); }}', orig)
-
-        elif m == 'idiv':
-            if _wsz(op1) == '32':
+                           f'if (_d && _n / _d <= 0xFFFFu) {{ cpu->ax = (uint16_t)(_n / _d); '
+                           f'cpu->dx = (uint16_t)(_n % _d); }} else {fault} }}', orig)
+            elif _wsz(op1) == '32':
                 # `cdq; idiv dword` is the standard 32-bit scale-then-divide.
                 # The 16-bit fallback built the dividend from DX:AX and truncated
                 # the divisor to int16, so a divisor of 0x10000 became 0 and the
                 # host took a #DE the guest would never have raised.
                 self._emit(f'{{ long long _n = (long long)(((uint64_t)cpu->edx << 32) '
                            f'| cpu->eax); int32_t _d = (int32_t){_read(op1)}; '
-                           f'if (_d) {{ cpu->eax = (uint32_t)(int32_t)(_n / _d); '
-                           f'cpu->edx = (uint32_t)(int32_t)(_n % _d); }} else {DIV0_FN}("idiv32"); }}', orig)
+                           f'long long _q = (_d && !(_d == -1 && _n == (-0x7FFFFFFFFFFFFFFFLL - 1))) ? _n / _d : 0; '
+                           f'if (_d && _q == (long long)(int32_t)_q && !(_d == -1 && _n == (-0x7FFFFFFFFFFFFFFFLL - 1))) '
+                           f'{{ cpu->eax = (uint32_t)(int32_t)_q; '
+                           f'cpu->edx = (uint32_t)(int32_t)(_n % _d); }} else {fault} }}', orig)
             elif op1.size == 1 or op1.type == OpType.REG8:
                 self._emit(f'{{ int16_t _n = (int16_t)cpu->ax; '
-                           f'int8_t _d = (int8_t){_read(op1)}; '
-                           f'if (_d) {{ cpu->al = (uint8_t)(int8_t)(_n / _d); '
-                           f'cpu->ah = (uint8_t)(int8_t)(_n % _d); }} else {DIV0_FN}("idiv8"); }}', orig)
+                           f'int8_t _d = (int8_t){_read(op1)}; int _q = _d ? (int)_n / _d : 0; '
+                           f'if (_d && _q >= -128 && _q <= 127) {{ cpu->al = (uint8_t)(int8_t)_q; '
+                           f'cpu->ah = (uint8_t)(int8_t)((int)_n % _d); }} else {fault} }}', orig)
             else:
                 self._emit(f'{{ int32_t _n = (int32_t)(((uint32_t)cpu->dx << 16) '
                            f'| cpu->ax); int16_t _d = (int16_t){_read(op1)}; '
-                           f'if (_d) {{ cpu->ax = (uint16_t)(int16_t)(_n / _d); '
-                           f'cpu->dx = (uint16_t)(int16_t)(_n % _d); }} else {DIV0_FN}("idiv16"); }}', orig)
+                           f'long long _q = _d ? (long long)_n / _d : 0; '
+                           f'if (_d && _q >= -32768 && _q <= 32767) {{ cpu->ax = (uint16_t)(int16_t)_q; '
+                           f'cpu->dx = (uint16_t)(int16_t)((long long)_n % _d); }} else {fault} }}', orig)
 
         # ─── Logic ───
 

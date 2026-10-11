@@ -182,6 +182,10 @@ versions follow [SemVer](https://semver.org/).
 - lift16: `bt`/`bts`/`btr`/`btc` with a register offset into memory address
   a bit string (the offset is signed and not reduced to the operand width);
   the word at the operand was tested instead. (#89)
+- lift16: a divide faults on quotient overflow too, not only on a zero
+  divisor (and INT64_MIN / -1 no longer kills the host), and `cpu->cs:ip`
+  is set to the divide before `DIV0_FN`, so a runtime can give a game's
+  INT 0 handler the frame it reads. `test_lift16_div.py`. (#91)
 - lift32: `repz ret` (F3 C3) lifts as a `ret`, and generate.py's extent walk
   ends a body at it. It was UNIMPLEMENTED, so MSVC 2005's
   `__security_check_cookie` fell through into `__report_gsfailure` and every
