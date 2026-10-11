@@ -1131,6 +1131,28 @@ class Lifter:
             self._emit(f'{{ uint{w}_t _s = (uint{w}_t)({_read(op2)}); int _i; '
                        f'if (!_s) cpu->flags |= FLAG_ZF; '
                        f'else {{ cpu->flags &= ~FLAG_ZF; {scan} {_write(op1, "_i")} }} }}', orig)
+        elif m in ('bt', 'bts', 'btr', 'btc') and op1.type in (OpType.MEM, OpType.MOFFS) \
+                and op2.type in (OpType.REG16, OpType.REG32):
+            # A register bit offset into memory addresses a bit STRING: the
+            # offset is signed and not reduced modulo the operand width, so
+            # `bt word [x], ax` with ax = 37 tests bit 5 of the word at x+4.
+            # (Immediate offsets are reduced; they take the branch below.)
+            # Microsoft Space Simulator keeps its key-down map this way.
+            w = int(_wsz(op1))
+            seg, off = _mem_addr(op1)
+            sh = 4 if w == 16 else 5
+            setexpr = {'bt': None,
+                       'bts': f'_v | ((uint{w}_t)1 << _b)',
+                       'btr': f'_v & ~((uint{w}_t)1 << _b)',
+                       'btc': f'_v ^ ((uint{w}_t)1 << _b)'}[m]
+            body = (f'{{ int{w}_t _i = (int{w}_t){_read(op2)}; '
+                    f'uint16_t _a = (uint16_t)(({off}) + (_i >> {sh}) * {w // 8}); '
+                    f'uint8_t _b = (uint8_t)(_i & {w - 1}); '
+                    f'uint{w}_t _v = mem_read{w}(cpu, {seg}, _a); '
+                    f'cpu->flags = (cpu->flags & ~FLAG_CF) | (((_v >> _b) & 1) ? FLAG_CF : 0); ')
+            if setexpr:
+                body += f'mem_write{w}(cpu, {seg}, _a, (uint{w}_t)({setexpr})); '
+            self._emit(body + '}', orig)
 
         elif m in ('bt', 'bts', 'btr', 'btc'):
             w = _wsz(op1)

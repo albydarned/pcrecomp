@@ -175,6 +175,9 @@ versions follow [SemVer](https://semver.org/).
   the carry; `rcr eax, 1` was garbage. Microsoft Space Simulator's Kepler
   solver never converged. difftest16 no longer compares OF after
   `shld`/`shrd` with a count other than 1. (#88)
+- lift16: `bt`/`bts`/`btr`/`btc` with a register offset into memory address
+  a bit string (the offset is signed and not reduced to the operand width);
+  the word at the operand was tested instead. (#89)
 - lift32: `repz ret` (F3 C3) lifts as a `ret`, and generate.py's extent walk
   ends a body at it. It was UNIMPLEMENTED, so MSVC 2005's
   `__security_check_cookie` fell through into `__report_gsfailure` and every
