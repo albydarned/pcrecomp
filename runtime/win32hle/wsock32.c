@@ -203,7 +203,7 @@ static void w_getsockopt(void) {                         /* (s, level, opt, val,
     if (A32(1) == NSPROTO_IPX) {
         uint32_t o = A32(3);
         if (A32(2) == 0x4007u && o) {                    /* IPX_ADDRESS: IPXEmu's one adapter */
-            memset((void *)(uintptr_t)o, 0, 24);
+            memset(G2H(o), 0, 24);
             MEM8(o + 13) = 1;                            /* node 00:00:00:00:00:01 */
             MEM8(o + 15) = 1;                            /* status: up */
             MEM32(o + 16) = 1470, MEM32(o + 20) = 1000000;   /* max packet, link speed */
@@ -252,10 +252,11 @@ static void w_ntohl(void) { RET(ntohl(A32(0)), 1); }
 static void w_ntohs(void) { RET(ntohs((uint16_t)A32(0)), 1); }
 static void w_inet_addr(void) { RET(ASTR(0) ? inet_addr(ASTR(0)) : 0xFFFFFFFFu, 1); }
 static void w_inet_ntoa(void) {                          /* (in_addr by value) */
-    static __thread char buf[16];
+    static __thread uint32_t bv;                         /* 16 bytes of guest memory per thread, as Winsock's */
+    if (!bv) bv = hle_guest_alloc(16);
     uint32_t a = A32(0);
-    snprintf(buf, sizeof buf, "%u.%u.%u.%u", a & 255, (a >> 8) & 255, (a >> 16) & 255, a >> 24);
-    RETP(buf, 1);
+    snprintf((char *)G2H(bv), 16, "%u.%u.%u.%u", a & 255, (a >> 8) & 255, (a >> 16) & 255, a >> 24);
+    RET(bv, 1);
 }
 static void w_gethostname(void) {
     if (gethostname(ASTR(0), A32(1)) != 0) FAIL(2);
@@ -264,20 +265,23 @@ static void w_gethostname(void) {
 /* hostent, in guest-readable memory: name, aliases, addrtype(2), length(2),
  * addr_list. One per thread, as Winsock's is. */
 static void w_gethostbyname(void) {
-    static __thread struct { uint32_t name, aliases; uint16_t type, len; uint32_t list; uint32_t lp[9]; uint32_t addr[8]; uint32_t none; char nm[256]; } he;
+    /* in guest memory: hostent (16), then lp[9], addr[8], a null, the name */
+    static __thread uint32_t hv;
+    enum { HE = 16, LP = HE, ADDR_ = LP + 36, NONE = ADDR_ + 32, NM = NONE + 4, ALL = NM + 256 };
+    if (!hv) hv = hle_guest_alloc(ALL);
     struct hostent *h = ASTR(0) ? gethostbyname(ASTR(0)) : NULL;
     if (!h || h->h_addrtype != AF_INET) { g_wsa_error = WSAHOST_NOT_FOUND; RET(0, 1); }
-    memset(&he, 0, sizeof he);
-    snprintf(he.nm, sizeof he.nm, "%s", h->h_name);
-    he.name = (uint32_t)(uintptr_t)he.nm;
-    he.aliases = (uint32_t)(uintptr_t)&he.none;
-    he.type = 2, he.len = 4;
-    he.list = (uint32_t)(uintptr_t)he.lp;
+    memset(G2H(hv), 0, ALL);
+    snprintf((char *)G2H(hv + NM), 256, "%s", h->h_name);
+    MEM32(hv) = hv + NM;                                 /* h_name */
+    MEM32(hv + 4) = hv + NONE;                           /* h_aliases: an empty list */
+    MEM16(hv + 8) = 2, MEM16(hv + 10) = 4;               /* AF_INET, 4 bytes */
+    MEM32(hv + 12) = hv + LP;                            /* h_addr_list */
     for (int i = 0; i < 8 && h->h_addr_list[i]; i++) {
-        memcpy(&he.addr[i], h->h_addr_list[i], 4);
-        he.lp[i] = (uint32_t)(uintptr_t)&he.addr[i];
+        memcpy(G2H(hv + ADDR_ + 4u * (uint32_t)i), h->h_addr_list[i], 4);
+        MEM32(hv + LP + 4u * (uint32_t)i) = hv + ADDR_ + 4u * (uint32_t)i;
     }
-    RETP(&he, 1);
+    RET(hv, 1);
 }
 
 /* ---- WSAAsyncSelect ---- */
@@ -317,7 +321,7 @@ static void w_EnumProtocolsA(void) {
     if (!want) RET(0, 3);
     if (!lenp || MEM32(lenp) < 32) { if (lenp) MEM32(lenp) = 32; g_wsa_error = 10055u /* WSAENOBUFS */; RET(SOCKET_ERROR, 3); }
     MEM32(buf) = 0x609, MEM32(buf + 4) = AF_IPX_WIN, MEM32(buf + 8) = 16, MEM32(buf + 12) = 14;
-    MEM32(buf + 16) = 2, MEM32(buf + 20) = NSPROTO_IPX, MEM32(buf + 24) = 576, MEM32(buf + 28) = (uint32_t)(uintptr_t)ipx_name;
+    MEM32(buf + 16) = 2, MEM32(buf + 20) = NSPROTO_IPX, MEM32(buf + 24) = 576, MEM32(buf + 28) = hle_guest_strdup(ipx_name);
     RET(1, 3);
 }
 

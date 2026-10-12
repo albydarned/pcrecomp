@@ -21,6 +21,15 @@
 #include <intrin.h>
 #elif defined(__i386__) || defined(__x86_64__)
 #include <x86intrin.h>   /* __rdtsc, as <intrin.h> gives MSVC */
+#else
+/* A host with no rdtsc (arm64): the monotonic clock in nanoseconds, which
+ * runs at a steady rate and only ever goes up, as a game expects of it. */
+#include <time.h>
+static inline uint64_t __rdtsc(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 #endif
 
 /* ============================================================

@@ -21,7 +21,9 @@ static uint32_t vcall(uint32_t obj, int slot, int n, const uint32_t *args) {
     for (int i = 0; i < n; i++) a[1 + i] = args[i];
     return hle_call_guest(MEM32(MEM32(obj) + 4u * (uint32_t)slot), n + 1, a);
 }
-#define P(x) ((uint32_t)(uintptr_t)(x))
+/* What the guest reads goes into guest memory; a cell is an out-parameter. */
+#define P(x) hle_guest_static((x), sizeof (x))
+static uint32_t cell(void) { return hle_guest_alloc(4); }
 static void wide(uint16_t *w, const char *s) { while ((*w++ = (uint8_t)*s++)) {} }
 
 int main(void) {
@@ -38,36 +40,41 @@ int main(void) {
     for (int i = 0; i < (int)sizeof bigdata; i++) bigdata[i] = (uint8_t)(i * 7);
     static const char hello[] = "Tiberian Sun save";
 
-    uint32_t stg = 0, s2 = 0, stm = 0, n = 0;
-    uint32_t a[6] = { P(file), 0x1012u /* CREATE | READWRITE | SHARE_EXCLUSIVE */, 0, P(&stg) };
+    uint32_t c_stg = cell(), c_s2 = cell(), c_stm = cell(), c_n = cell();
+#define stg MEM32(c_stg)
+#define s2  MEM32(c_s2)
+#define stm MEM32(c_stm)
+#define n   MEM32(c_n)
+    uint32_t a[6] = { P(file), 0x1012u /* CREATE | READWRITE | SHARE_EXCLUSIVE */, 0, c_stg };
     ok("StgCreateDocfile", call("StgCreateDocfile", 4, a) == 0 && stg);
-    uint32_t cs[5] = { P(sub), 0x12u, 0, 0, P(&s2) };
+    uint32_t cs[5] = { P(sub), 0x12u, 0, 0, c_s2 };
     ok("CreateStorage", vcall(stg, 5, 5, cs) == 0 && s2);
-    uint32_t c1[5] = { P(small), 0x12u, 0, 0, P(&stm) };
+    uint32_t c1[5] = { P(small), 0x12u, 0, 0, c_stm };
     ok("CreateStream small", vcall(s2, 3, 5, c1) == 0 && stm);
-    uint32_t w1[3] = { P(hello), sizeof hello, P(&n) };
+    uint32_t w1[3] = { P(hello), sizeof hello, c_n };
     ok("Write small", vcall(stm, 4, 3, w1) == 0 && n == sizeof hello);
     vcall(stm, 2, 0, NULL);
-    uint32_t c2[5] = { P(big), 0x12u, 0, 0, P(&stm) };
+    uint32_t c2[5] = { P(big), 0x12u, 0, 0, c_stm };
     ok("CreateStream big", vcall(s2, 3, 5, c2) == 0 && stm);
-    uint32_t w2[3] = { P(bigdata), sizeof bigdata, P(&n) };
+    uint32_t w2[3] = { P(bigdata), sizeof bigdata, c_n };
     ok("Write big", vcall(stm, 4, 3, w2) == 0 && n == sizeof bigdata);
     vcall(stm, 2, 0, NULL);
     vcall(s2, 2, 0, NULL);
     vcall(stg, 2, 0, NULL);                              /* the last release writes the file */
 
-    uint32_t o[6] = { P(file), 0, 0x10u /* READ | SHARE_EXCLUSIVE */, 0, 0, P(&stg) };
+    uint32_t o[6] = { P(file), 0, 0x10u /* READ | SHARE_EXCLUSIVE */, 0, 0, c_stg };
     ok("StgOpenStorage", call("StgOpenStorage", 6, o) == 0 && stg);
-    uint32_t os[6] = { P(sub), 0, 0x10u, 0, 0, P(&s2) };
+    uint32_t os[6] = { P(sub), 0, 0x10u, 0, 0, c_s2 };
     ok("OpenStorage", vcall(stg, 6, 6, os) == 0 && s2);
-    static uint8_t back[sizeof bigdata];
-    uint32_t r1[5] = { P(small), 0, 0x10u, 0, P(&stm) };
+    uint32_t v_back = hle_guest_alloc(sizeof bigdata);
+    const uint8_t *back = (const uint8_t *)G2H(v_back);
+    uint32_t r1[5] = { P(small), 0, 0x10u, 0, c_stm };
     ok("OpenStream small", vcall(s2, 4, 5, r1) == 0 && stm);
-    uint32_t rd[3] = { P(back), sizeof back, P(&n) };
+    uint32_t rd[3] = { v_back, sizeof bigdata, c_n };
     vcall(stm, 3, 3, rd);
     ok("small read back", n == sizeof hello && !memcmp(back, hello, sizeof hello));
     vcall(stm, 2, 0, NULL);
-    uint32_t r2[5] = { P(big), 0, 0x10u, 0, P(&stm) };
+    uint32_t r2[5] = { P(big), 0, 0x10u, 0, c_stm };
     ok("OpenStream big", vcall(s2, 4, 5, r2) == 0 && stm);
     vcall(stm, 3, 3, rd);
     ok("big read back", n == sizeof bigdata && !memcmp(back, bigdata, sizeof bigdata));

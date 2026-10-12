@@ -58,7 +58,7 @@ void hle_exit(int code) {
 }
 
 static void k_GetProcessHeap(void)      { RET(0x00000001u, 0); }        /* every heap is the one heap */
-static void k_GetCommandLineA(void)     { RETP(g_cmdline, 0); }
+static void k_GetCommandLineA(void)     { RET(hle_guest_strdup(g_cmdline), 0); }
 static void k_GetCurrentProcess(void)   { RET(0xFFFFFFFFu, 0); }        /* pseudo-handle */
 static void k_GetCurrentProcessId(void) { RET((uint32_t)getpid(), 0); }
 static void k_ExitProcess(void)         { fprintf(stderr, "[win32hle] ExitProcess(%u)\n", A32(0)); hle_exit((int)A32(0)); }
@@ -87,7 +87,7 @@ static void k_FormatMessageA(void) {                     /* (flags, source, id, 
     if (A32(0) & 0x100u) {                               /* FORMAT_MESSAGE_ALLOCATE_BUFFER */
         char *p = (char *)hle_alloc(n + 1);
         memcpy(p, text, n + 1);
-        if (A32(4)) MEM32(A32(4)) = (uint32_t)(uintptr_t)p;
+        if (A32(4)) MEM32(A32(4)) = H2G(p);
         RET(n, 7);
     }
     if (!A32(4) || A32(5) <= n) RET(0, 7);
@@ -103,6 +103,8 @@ uint32_t hle_thread_id(void) {
     if (!g_tid) g_tid = __sync_add_and_fetch(&g_next_tid, 4);
     return g_tid;
 }
+uint32_t hle_thread_new_id(void) { return __sync_add_and_fetch(&g_next_tid, 4); }
+void hle_thread_adopt_id(uint32_t id) { g_tid = id; }
 static void k_GetCurrentThreadId(void) { RET(hle_thread_id(), 0); }
 
 /* GetVersion: Windows XP (5.1, build 2600, NT). LOWORD = major|minor<<8,
@@ -112,40 +114,22 @@ static void k_GetVersionExA(void) {                      /* OSVERSIONINFOA: size
     uint32_t v = A32(0);
     if (!v) RET(0, 1);
     MEM32(v + 4) = 5, MEM32(v + 8) = 1, MEM32(v + 12) = 2600, MEM32(v + 16) = 2;
-    snprintf((char *)(uintptr_t)(v + 20), 128, "Service Pack 3");
+    snprintf((char *)G2H(v + 20), 128, "Service Pack 3");
     RET(1, 1);
 }
 
 /* --- heap ---
- * One heap. Each block carries its size in front (HeapSize and _msize answer
- * from it, and a Local/Global block is the same kind of block). */
-#define HDR 16u
-static void *blk_alloc(uint32_t n, int zero) {
-    uint8_t *p = (uint8_t *)(zero ? calloc(1, (size_t)n + HDR) : malloc((size_t)n + HDR));
-    if (!p) return NULL;
-    *(uint32_t *)p = n;
-    *(uint32_t *)(p + 4) = 0x48454150u;                  /* 'HEAP' */
-    return p + HDR;
-}
-static int blk_ok(void *u) { return u && *(uint32_t *)((uint8_t *)u - HDR + 4) == 0x48454150u; }
-static uint32_t blk_size(void *u) { return blk_ok(u) ? *(uint32_t *)((uint8_t *)u - HDR) : 0; }
-static void blk_free(void *u) {
-    if (!u) return;
-    if (!blk_ok(u)) { fprintf(stderr, "[win32hle] free of a block this heap did not hand out: %p\n", u); return; }
-    *(uint32_t *)((uint8_t *)u - HDR + 4) = 0;
-    free((uint8_t *)u - HDR);
-}
+ * One heap, the guest heap (guest_mem.c). Each block knows its size
+ * (HeapSize and _msize answer from it, and a Local/Global block is the same
+ * kind of block). These faces take and give host pointers into it. */
+static void *blk_alloc(uint32_t n, int zero) { uint32_t va = hle_guest_alloc2(n, zero); return va ? G2H(va) : NULL; }
+static int blk_ok(void *u) { return u && hle_guest_block_ok(H2G(u)); }
+static uint32_t blk_size(void *u) { return blk_ok(u) ? hle_guest_size(H2G(u)) : 0; }
+static void blk_free(void *u) { if (u) hle_guest_free(H2G(u)); }
 static void *blk_realloc(void *u, uint32_t n, int zero) {
-    if (!u) return blk_alloc(n, zero);
-    uint32_t old = blk_size(u);
-    uint8_t *p = (uint8_t *)realloc((uint8_t *)u - HDR, (size_t)n + HDR);
-    if (!p) return NULL;
-    *(uint32_t *)p = n;
-    if (zero && n > old) memset(p + HDR + old, 0, n - old);
-    return p + HDR;
+    uint32_t va = hle_guest_realloc(u ? H2G(u) : 0, n, zero);
+    return va ? G2H(va) : NULL;
 }
-void *hle_alloc(uint32_t n) { return blk_alloc(n, 1); }
-void  hle_free(void *p) { blk_free(p); }
 
 static void k_HeapCreate(void)  { RET(0x00000001u, 3); }
 static void k_HeapDestroy(void) { RET(1, 1); }
@@ -159,9 +143,8 @@ static void k_HeapReAlloc(void) {                        /* (hHeap, flags, ptr, 
     uint32_t fl = A32(1), n = A32(3);
     void *u = APTR(2);
     if (fl & HEAP_REALLOC_IN_PLACE_ONLY) {
-        if (!blk_ok(u) || n > blk_size(u)) { g_last_error = ERROR_NOT_ENOUGH_MEMORY; RET(0, 4); }
-        *(uint32_t *)((uint8_t *)u - HDR) = n;
-        RETP(u, 4);
+        if (!blk_ok(u) || n > hle_guest_capacity(H2G(u))) { g_last_error = ERROR_NOT_ENOUGH_MEMORY; RET(0, 4); }
+        RETP(blk_realloc(u, n, (fl & HEAP_ZERO_MEMORY) != 0), 4);   /* fits: stays where it is */
     }
     RETP(blk_realloc(u, n, (fl & HEAP_ZERO_MEMORY) != 0), 4);
 }
@@ -182,63 +165,44 @@ static void k_GlobalSize(void)  { RET(blk_size(APTR(0)), 1); }
 static void k_GlobalHandle(void){ RET(A32(0), 1); }
 
 /* --- virtual memory ---
- * A reservation is an mmap of the whole range, read-write (pages cost nothing
- * until touched); commit within it hands back the address; decommit drops the
- * pages (they read as zero when committed again); release unmaps the
- * reservation, whose size is remembered here. */
+ * A reservation is a guest mapping of the whole range (guest_mem.c), read-
+ * write, its pages costing nothing until touched; commit within it hands
+ * back the address; decommit gives the pages back (they read as zero when
+ * committed again); release unmaps it. */
 #define MEM_COMMIT   0x1000u
 #define MEM_RESERVE  0x2000u
 #define MEM_DECOMMIT 0x4000u
 #define MEM_RELEASE  0x8000u
-#define MAX_REGIONS 1024
-static struct { uint32_t base, size; } g_region[MAX_REGIONS];
-
-static int region_of(uint32_t a) {
-    for (int i = 0; i < MAX_REGIONS; i++)
-        if (g_region[i].size && a >= g_region[i].base && a - g_region[i].base < g_region[i].size) return i;
-    return -1;
-}
 
 static void k_VirtualAlloc(void) {                       /* (addr, size, type, protect) */
     uint32_t addr = A32(0), size = (A32(1) + 0xFFFu) & ~0xFFFu, type = A32(2);
-    if (addr && region_of(addr) >= 0) {                  /* commit inside a reservation */
-        RET(addr & ~0xFFFu, 4);
-    }
+    if (addr && hle_guest_region_of(addr, NULL, NULL)) RET(addr & ~0xFFFu, 4);   /* commit inside a reservation */
     if (!size) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 4); }
-    void *p = mmap(addr ? (void *)(uintptr_t)(addr & ~0xFFFFu) : NULL, size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | (addr ? 0x100000 /* MAP_FIXED_NOREPLACE */ : 0), -1, 0);
-    if (p == MAP_FAILED || (addr && (uint32_t)(uintptr_t)p != (addr & ~0xFFFFu))) {
-        if (p != MAP_FAILED) munmap(p, size);
-        g_last_error = ERROR_NOT_ENOUGH_MEMORY;
-        RET(0, 4);
-    }
-    for (int i = 0; i < MAX_REGIONS; i++)
-        if (!g_region[i].size) { g_region[i].base = (uint32_t)(uintptr_t)p, g_region[i].size = size; break; }
+    uint32_t lo = addr & ~0xFFFFu;
+    uint32_t va = addr ? hle_guest_map(lo, size + (addr - lo)) : hle_guest_map_any(size);
+    if (!va) { g_last_error = ERROR_NOT_ENOUGH_MEMORY; RET(0, 4); }
     (void)type;
-    RETP(p, 4);
+    RET(addr ? lo : va, 4);
 }
 static void k_VirtualFree(void) {                        /* (addr, size, type) */
-    uint32_t addr = A32(0), size = A32(1), type = A32(2);
-    int i = region_of(addr);
-    if (i < 0) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
-    if (type & MEM_RELEASE) {
-        munmap((void *)(uintptr_t)g_region[i].base, g_region[i].size);
-        g_region[i].size = 0;
-    } else if (type & MEM_DECOMMIT) {
-        uint32_t a = addr & ~0xFFFu, end = size ? (addr + size + 0xFFFu) & ~0xFFFu : g_region[i].base + g_region[i].size;
-        madvise((void *)(uintptr_t)a, end - a, MADV_DONTNEED);
+    uint32_t addr = A32(0), size = A32(1), type = A32(2), base, rsize;
+    if (!hle_guest_region_of(addr, &base, &rsize)) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
+    if (type & MEM_RELEASE) hle_guest_unmap(base, rsize);
+    else if (type & MEM_DECOMMIT) {
+        uint32_t a = addr & ~0xFFFu, end = size ? (addr + size + 0xFFFu) & ~0xFFFu : base + rsize;
+        hle_guest_decommit(a, end - a);
     }
     RET(1, 3);
 }
 static void k_VirtualProtect(void) { if (A32(3)) MEM32(A32(3)) = 0x04u; RET(1, 4); }   /* PAGE_READWRITE before */
 static void k_VirtualQuery(void) {                       /* (addr, &MEMORY_BASIC_INFORMATION, len) */
-    uint32_t a = A32(0), m = A32(1);
-    int i = region_of(a);
+    uint32_t a = A32(0), m = A32(1), base = 0, rsize = 0;
+    int in = hle_guest_region_of(a, &base, &rsize);
     if (!m || A32(2) < 28) RET(0, 3);
     MEM32(m) = a & ~0xFFFu;
-    MEM32(m + 4) = i >= 0 ? g_region[i].base : a & ~0xFFFFu;
+    MEM32(m + 4) = in ? base : a & ~0xFFFFu;
     MEM32(m + 8) = 0x04u;
-    MEM32(m + 12) = i >= 0 ? g_region[i].base + g_region[i].size - (a & ~0xFFFu) : 0x1000u;
+    MEM32(m + 12) = in ? base + rsize - (a & ~0xFFFu) : 0x1000u;
     MEM32(m + 16) = MEM_COMMIT, MEM32(m + 20) = 0x04u, MEM32(m + 24) = 0x20000u;
     RET(28, 3);
 }
@@ -287,14 +251,14 @@ static void k_lstrcmpA(void) { RET((uint32_t)strcmp(ASTR(0) ? ASTR(0) : "", ASTR
 static void k_lstrcmpiA(void) { RET((uint32_t)strcasecmp(ASTR(0) ? ASTR(0) : "", ASTR(1) ? ASTR(1) : ""), 2); }
 
 /* STARTUPINFOA is 68 bytes; the CRT reads it early. */
-static void k_GetStartupInfoA(void) { uint32_t si = A32(0); if (si) { memset((void *)(uintptr_t)si, 0, 68); MEM32(si) = 68; } RETV(1); }
+static void k_GetStartupInfoA(void) { uint32_t si = A32(0); if (si) { memset(G2H(si), 0, 68); MEM32(si) = 68; } RETV(1); }
 
 /* --- critical sections ---
  * CRITICAL_SECTION: DebugInfo, LockCount, RecursionCount, OwningThread,
  * LockSemaphore, SpinCount. The guest's own struct holds the state. */
 #define CS_REC(cs)   MEM32((cs) + 8)
 #define CS_OWNER(cs) MEM32((cs) + 12)
-static void k_InitializeCriticalSection(void) { uint32_t cs = A32(0); if (cs) memset((void *)(uintptr_t)cs, 0, 24), MEM32(cs + 4) = 0xFFFFFFFFu; RETV(1); }
+static void k_InitializeCriticalSection(void) { uint32_t cs = A32(0); if (cs) memset(G2H(cs), 0, 24), MEM32(cs + 4) = 0xFFFFFFFFu; RETV(1); }
 static void k_DeleteCriticalSection(void) { RETV(1); }
 void hle_enter_cs(uint32_t cs) {
     uint32_t me = hle_thread_id();

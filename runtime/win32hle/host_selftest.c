@@ -48,9 +48,11 @@ static uint32_t fb[FB_W * FB_H];
 static uint8_t  g_bmi[40];
 static uint32_t g_dib[16];
 static uint8_t  g_wc[40];
-static uint8_t  g_msg[28];
 static char     g_clsname[] = "appwnd";
 static char     g_title[]   = "t";
+/* ...and where the guest sees them: copies in guest memory (an image's data
+ * would be there already) */
+static uint32_t v_bmi, v_dib, v_wc, v_msg, v_clsname, v_title;
 static int      g_paint_count;
 static uint32_t src_pixel(int x, int y) { return 0xFF000000u | (uint32_t)((x << 4) | y); }
 
@@ -67,7 +69,7 @@ static void app_entry(void) {
     RECOMP_ICALL(MEM32(IMAGE_BASE + RVA_IAT));
     uint32_t hinst = eax;
 
-    PUSH32(esp, (uint32_t)(uintptr_t)g_wc);
+    PUSH32(esp, v_wc);
     RECOMP_ICALL(VA_RegisterClassA);
 
     /* CreateWindowExA(exStyle,class,title,style,x,y,w,h,parent,menu,hinst,param) */
@@ -80,8 +82,8 @@ static void app_entry(void) {
     PUSH32(esp, 0);                                   /* y         */
     PUSH32(esp, 0);                                   /* x         */
     PUSH32(esp, 0);                                   /* style     */
-    PUSH32(esp, (uint32_t)(uintptr_t)g_title);        /* winName   */
-    PUSH32(esp, (uint32_t)(uintptr_t)g_clsname);      /* className */
+    PUSH32(esp, v_title);                             /* winName   */
+    PUSH32(esp, v_clsname);                           /* className */
     PUSH32(esp, 0);                                   /* exStyle   */
     RECOMP_ICALL(VA_CreateWindowExA);
     uint32_t hwnd = eax;
@@ -94,11 +96,11 @@ static void app_entry(void) {
     PUSH32(esp, 0); RECOMP_ICALL(VA_PostQuitMessage);
 
     for (;;) {
-        PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, (uint32_t)(uintptr_t)g_msg);
+        PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, v_msg);
         RECOMP_ICALL(VA_GetMessageA);
         if (eax == 0) break;
-        PUSH32(esp, (uint32_t)(uintptr_t)g_msg); RECOMP_ICALL(VA_TranslateMessage);
-        PUSH32(esp, (uint32_t)(uintptr_t)g_msg); RECOMP_ICALL(VA_DispatchMessageA);
+        PUSH32(esp, v_msg); RECOMP_ICALL(VA_TranslateMessage);
+        PUSH32(esp, v_msg); RECOMP_ICALL(VA_DispatchMessageA);
     }
     eax = 0x1234;   /* exit code */
 }
@@ -111,7 +113,7 @@ static void app_wndproc(void) {
         g_paint_count++;
         /* StretchDIBits(hdc,0,0,FB_W,FB_H, 0,0,4,4, g_dib, g_bmi, 0, SRCCOPY) */
         PUSH32(esp, 0x00CC0020u); PUSH32(esp, 0);
-        PUSH32(esp, (uint32_t)(uintptr_t)g_bmi); PUSH32(esp, (uint32_t)(uintptr_t)g_dib);
+        PUSH32(esp, v_bmi); PUSH32(esp, v_dib);
         PUSH32(esp, 4); PUSH32(esp, 4); PUSH32(esp, 0); PUSH32(esp, 0);
         PUSH32(esp, FB_H); PUSH32(esp, FB_W); PUSH32(esp, 0); PUSH32(esp, 0);
         PUSH32(esp, 0);
@@ -164,11 +166,17 @@ int main(void) {
     recomp_host_init();
 
     /* the "image data" the app draws with: a window class, a 4x4 DIB, a header */
+    v_clsname = hle_guest_strdup(g_clsname);
+    v_title = hle_guest_strdup(g_title);
     *(uint32_t *)(g_wc + 4)  = WNDPROC_VA;                        /* lpfnWndProc  */
-    *(uint32_t *)(g_wc + 36) = (uint32_t)(uintptr_t)g_clsname;    /* lpszClassName */
+    *(uint32_t *)(g_wc + 36) = v_clsname;                         /* lpszClassName */
     g_bmi[0] = 40; g_bmi[4] = 4; { int32_t h = -4; memcpy(g_bmi + 8, &h, 4); }
     g_bmi[12] = 1; g_bmi[14] = 32;
     for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) g_dib[y * 4 + x] = src_pixel(x, y);
+    v_wc = hle_guest_static(g_wc, sizeof g_wc);
+    v_bmi = hle_guest_static(g_bmi, sizeof g_bmi);
+    v_dib = hle_guest_static(g_dib, sizeof g_dib);
+    v_msg = hle_guest_alloc(28);
     hle_gdi_set_target(fb, FB_W, FB_H);
 
     VA_RegisterClassA   = hle_resolve("RegisterClassA");

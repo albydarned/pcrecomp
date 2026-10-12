@@ -116,19 +116,19 @@ int main(void) {
     ok("recomp_pe_map succeeds", recomp_pe_map(path, &img) == 0);
     ok("mapped at ImageBase",    img.base == IMAGE_BASE);
     ok("entry point VA",         img.entry == IMAGE_BASE + SEC_RVA);
-    ok("section data at its VA",  *(uint32_t *)(uintptr_t)(img.base + RVA_MARKER) == 0xCAFEBABEu);
+    ok("section data at its VA",  MEM32(img.base + RVA_MARKER) == 0xCAFEBABEu);
 
     int unresolved = recomp_pe_bind(&img, hle_resolve);
     ok("all imports resolved",   unresolved == 0);
-    uint32_t *iat = (uint32_t *)(uintptr_t)(img.base + RVA_IAT);
+    uint32_t *iat = (uint32_t *)G2H(img.base + RVA_IAT);
     ok("IAT[0] -> GetTickCount shim", iat[0] == hle_resolve("GetTickCount") && iat[0] != 0);
     ok("IAT[1] -> HeapAlloc shim",    iat[1] == hle_resolve("HeapAlloc")    && iat[1] != 0);
 
     /* relocate the image +0x100000 and confirm the HIGHLOW fixup moved the
      * absolute VA by exactly the delta. */
-    uint32_t before = *(uint32_t *)(uintptr_t)(img.base + RVA_RELTGT);
+    uint32_t before = MEM32(img.base + RVA_RELTGT);
     recomp_pe_relocate(img.base, RVA_RELOC, 10, 0x00100000);
-    uint32_t after = *(uint32_t *)(uintptr_t)(img.base + RVA_RELTGT);
+    uint32_t after = MEM32(img.base + RVA_RELTGT);
     ok("base reloc applied the delta", before == 0x00401000u && after == 0x00501000u);
 
     if (fails == 0) printf("pe_loader_selftest: all checks passed\n");

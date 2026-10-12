@@ -41,7 +41,8 @@ static uint32_t g_fb[FB_W * FB_H];
 void hle_gdi_set_target(uint32_t *pixels, int w, int h);
 
 static uint8_t  g_bmi[40];       /* BITMAPINFOHEADER: 4x4, top-down, 32bpp */
-static uint32_t g_dibbits_slot;  /* CreateDIBSection writes the pixel ptr here */
+static uint32_t v_bmi;           /* ...and its copy in guest memory, where the guest reads it */
+static uint32_t v_dibbits_slot;  /* a guest cell CreateDIBSection writes the pixel ptr into */
 static uint32_t src_pixel(int x, int y) { return 0xFF000000u | (uint32_t)((x << 4) | y); }
 
 /* guest: p = HeapAlloc(heap, 0, 64); for (i<16) p[i]=i*i; return p;
@@ -74,12 +75,12 @@ static void guest_draw(void) {
     /* CreateDIBSection(hdc=0, &bmi, usage=0, &bits_slot, hSection=0, offset=0) */
     PUSH32(esp, 0);                                   /* offset   */
     PUSH32(esp, 0);                                   /* hSection */
-    PUSH32(esp, (uint32_t)(uintptr_t)&g_dibbits_slot);/* ppvBits  */
+    PUSH32(esp, v_dibbits_slot);                      /* ppvBits  */
     PUSH32(esp, 0);                                   /* usage    */
-    PUSH32(esp, (uint32_t)(uintptr_t)g_bmi);          /* pbmi     */
+    PUSH32(esp, v_bmi);                               /* pbmi     */
     PUSH32(esp, 0);                                   /* hdc      */
     RECOMP_ICALL(VA_CreateDIBSection);
-    uint32_t bits = g_dibbits_slot;
+    uint32_t bits = MEM32(v_dibbits_slot);
     for (uint32_t y = 0; y < 4; y++)
         for (uint32_t x = 0; x < 4; x++)
             MEM32(bits + 4 * (y * 4 + x)) = src_pixel((int)x, (int)y);
@@ -87,7 +88,7 @@ static void guest_draw(void) {
     /* StretchDIBits(hdc,0,0,8,8, 0,0,4,4, bits, &bmi, 0, SRCCOPY=0xCC0020) */
     PUSH32(esp, 0x00CC0020u);                         /* rop     */
     PUSH32(esp, 0);                                   /* usage   */
-    PUSH32(esp, (uint32_t)(uintptr_t)g_bmi);          /* bmi     */
+    PUSH32(esp, v_bmi);                               /* bmi     */
     PUSH32(esp, bits);                                /* bits    */
     PUSH32(esp, 4); PUSH32(esp, 4);                   /* hS, wS  (pushed hS then wS) */
     PUSH32(esp, 0); PUSH32(esp, 0);                   /* yS, xS  */
@@ -134,6 +135,8 @@ int main(void) {
     { int32_t h=-4; memcpy(g_bmi+8,&h,4); }      /* biHeight = -4 (top-down) */
     g_bmi[12]=1;                                 /* biPlanes */
     g_bmi[14]=32;                                /* biBitCount */
+    v_bmi = hle_guest_static(g_bmi, sizeof g_bmi);
+    v_dibbits_slot = hle_guest_alloc(4);
     hle_gdi_set_target(g_fb, FB_W, FB_H);
 
     mach_enter();   /* claim the register file / establish this thread's stack+TIB */
@@ -148,7 +151,7 @@ int main(void) {
 
     /* 2. guest -> shim with a pointer arg: lstrlenA. */
     static const char msg[] = "win32hle";
-    esi = (uint32_t)(uintptr_t)msg;
+    esi = hle_guest_strdup(msg);
     guest_strlen();
     ok("lstrlenA counted the string", eax == strlen(msg));
 

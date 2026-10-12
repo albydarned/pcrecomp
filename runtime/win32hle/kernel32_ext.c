@@ -21,6 +21,13 @@
 #include <sys/statvfs.h>
 #include "win32hle.h"
 
+/* macOS names the stat timespecs st_mtimespec and st_atimespec; POSIX.1-2008
+ * (Linux, the BSDs) st_mtim and st_atim. */
+#if defined(__APPLE__) && !defined(st_mtim)
+#define st_mtim st_mtimespec
+#define st_atim st_atimespec
+#endif
+
 #define INVALID_HANDLE  0xFFFFFFFFu
 #define ERROR_FILE_NOT_FOUND    2u
 #define ERROR_PATH_NOT_FOUND    3u
@@ -209,7 +216,7 @@ static void put_ft(uint32_t at, uint64_t ft) { if (at) MEM32(at) = (uint32_t)ft,
 static uint64_t get_ft(uint32_t at) { return at ? (uint64_t)MEM32(at) | (uint64_t)MEM32(at + 4) << 32 : 0; }
 
 static void put_systemtime(uint32_t st, const struct tm *t, int ms) {
-    uint16_t *w = (uint16_t *)(uintptr_t)st;
+    uint16_t *w = (uint16_t *)G2H(st);
     w[0] = (uint16_t)(t->tm_year + 1900), w[1] = (uint16_t)(t->tm_mon + 1), w[2] = (uint16_t)t->tm_wday;
     w[3] = (uint16_t)t->tm_mday, w[4] = (uint16_t)t->tm_hour, w[5] = (uint16_t)t->tm_min;
     w[6] = (uint16_t)t->tm_sec, w[7] = (uint16_t)ms;
@@ -313,7 +320,7 @@ static void k_GetFileInformationByHandle(void) {         /* (h, &BY_HANDLE_FILE_
     uint32_t o = A32(1);
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0) { hle_set_last_error(ERROR_INVALID_HANDLE); RET(0, 2); }
-    memset((void *)(uintptr_t)o, 0, 52);
+    memset(G2H(o), 0, 52);
     MEM32(o) = attrs_of(&st);
     put_ft(o + 4, unix_to_ft(st.st_mtim.tv_sec, st.st_mtim.tv_nsec));
     put_ft(o + 12, unix_to_ft(st.st_atim.tv_sec, st.st_atim.tv_nsec));
@@ -425,7 +432,7 @@ static void fill_find(uint32_t o, const char *dir, const char *name) {
     char full[1300];
     struct stat st;
     snprintf(full, sizeof full, "%s/%s", dir, name);
-    memset((void *)(uintptr_t)o, 0, 320);
+    memset(G2H(o), 0, 320);
     if (stat(full, &st) == 0) {
         MEM32(o) = attrs_of(&st);
         put_ft(o + 4, unix_to_ft(st.st_mtim.tv_sec, st.st_mtim.tv_nsec));
@@ -433,7 +440,7 @@ static void fill_find(uint32_t o, const char *dir, const char *name) {
         put_ft(o + 20, unix_to_ft(st.st_mtim.tv_sec, st.st_mtim.tv_nsec));
         MEM32(o + 28) = (uint32_t)((uint64_t)st.st_size >> 32), MEM32(o + 32) = (uint32_t)st.st_size;
     }
-    strncpy((char *)(uintptr_t)(o + 44), name, 259);
+    strncpy((char *)G2H(o + 44), name, 259);
 }
 
 static int shown_already(hfind *f, const char *name) {

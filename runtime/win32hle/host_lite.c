@@ -101,12 +101,12 @@ static void regs_load(const regs_t *r) {
 #define GUEST_STACK (4u << 20)
 
 static uint32_t make_tib(uint32_t lo, uint32_t hi) {
-    uint32_t *t = (uint32_t *)calloc(1, 0x1000);
-    t[0]        = 0xFFFFFFFFu;                 /* ExceptionList: end of chain */
-    t[1]        = hi;                          /* StackBase                   */
-    t[2]        = lo;                          /* StackLimit                  */
-    t[0x18/4]   = (uint32_t)(uintptr_t)t;      /* Self (fs:[0x18])            */
-    return (uint32_t)(uintptr_t)t;
+    uint32_t t = hle_guest_alloc(0x1000);
+    MEM32(t)        = 0xFFFFFFFFu;             /* ExceptionList: end of chain */
+    MEM32(t + 4)    = hi;                      /* StackBase                   */
+    MEM32(t + 8)    = lo;                      /* StackLimit                  */
+    MEM32(t + 0x18) = t;                       /* Self (fs:[0x18])            */
+    return t;
 }
 
 typedef struct { regs_t r; int depth, inited; } mstate;
@@ -115,7 +115,7 @@ static __thread mstate g_ms;
 void mach_enter(void) {
     if (g_ms.depth++ == 0) {
         if (!g_ms.inited) {
-            uint32_t lo = (uint32_t)(uintptr_t)calloc(1, GUEST_STACK);
+            uint32_t lo = hle_guest_map_any(GUEST_STACK);
             g_ms.r.esp    = lo + GUEST_STACK - 64;
             g_ms.r.fs     = make_tib(lo, lo + GUEST_STACK);
             g_ms.r.fpu_cw = 0x027F;

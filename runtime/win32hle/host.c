@@ -14,6 +14,7 @@ static pe_image g_img;
 static int      g_booted;
 
 void recomp_host_init(void) {
+    hle_guest_init();
     win32hle_register(win32hle_kernel32);
     win32hle_register(win32hle_kernel32_ext);
     win32hle_register(win32hle_kernel32_crt);

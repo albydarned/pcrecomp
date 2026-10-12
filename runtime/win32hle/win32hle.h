@@ -32,24 +32,54 @@
 #include "recomp_types.h"   /* g_eax, g_esp, MEM*, recomp_func_t, the dispatch contract */
 
 /* ---- the Win32 ABI, portably ----
- * Win32 is 32-bit stdcall. On a 32-bit host a guest pointer is a host pointer,
- * so HANDLE/HWND/HDC are just uint32_t the host casts as needed. */
+ * Win32 is 32-bit stdcall. A guest pointer is a 32-bit VA: on a 32-bit flat
+ * host a host address too, on a 64-bit host an offset into the guest's
+ * reservation (guest_mem.c). G2H and H2G convert; HANDLE/HWND/HDC are just
+ * uint32_t the host looks up. */
 typedef uint32_t win_handle;   /* HANDLE/HWND/HDC/HMODULE/HBITMAP... */
+
+/* ---- guest memory (guest_mem.c) ----
+ * Every byte the guest can address is in guest memory, and every pointer a
+ * shim hands the guest (RETP, a struct's field) is to guest memory: the
+ * heap below, a mapping, or a copy made by hle_guest_static. A host pointer
+ * into guest memory converts back with H2G; one that is not aborts. Values
+ * below 0x10000 pass through both ways (0 is NULL, a Win32 atom is an atom). */
+void    *hle_g2h(uint32_t va);
+uint32_t hle_h2g(const void *p);
+#define G2H(va) hle_g2h(va)
+#define H2G(p)  hle_h2g(p)
+int      hle_guest_init(void);                           /* the reservation; implied by the first use */
+uint32_t hle_guest_map(uint32_t va, uint32_t size);      /* memory at a fixed VA (an image): the VA, or 0 if taken */
+uint32_t hle_guest_map_any(uint32_t size);               /* memory anywhere, zeroed, 64 KB aligned: the VA, or 0 */
+void     hle_guest_unmap(uint32_t va, uint32_t size);
+void     hle_guest_decommit(uint32_t va, uint32_t size); /* pages given back; zero when touched again */
+int      hle_guest_region_of(uint32_t va, uint32_t *base, uint32_t *size);   /* the mapping holding va, if any */
+uint32_t hle_guest_alloc(uint32_t n);                    /* a zeroed heap block: its VA, or 0 */
+uint32_t hle_guest_alloc2(uint32_t n, int zero);
+uint32_t hle_guest_realloc(uint32_t va, uint32_t n, int zero);
+void     hle_guest_free(uint32_t va);
+uint32_t hle_guest_size(uint32_t va);                    /* what was asked for; 0 if not a block */
+uint32_t hle_guest_capacity(uint32_t va);                /* what it can grow to in place */
+int      hle_guest_block_ok(uint32_t va);
+uint32_t hle_guest_static(const void *data, uint32_t n); /* a copy for the run; the same host pointer gives the same VA */
+uint32_t hle_guest_strdup(const char *s);
+void    *hle_alloc_raw(uint32_t n);                      /* hle_alloc without the zeroing */
+/* printf over the guest's 4-byte argument slots at args_va (hle_format.c):
+ * a va_list cannot point at them on a 64-bit host. */
+int      hle_vsnprintf_guest(char *out, size_t cap, const char *fmt, uint32_t args_va);
 
 /* Stdcall argument access from inside a shim. g_esp -> [ret][arg0][arg1]...,
  * so argument i (0-based) is at g_esp + 4 + 4*i. */
-static inline uint32_t hle_a32(int i) {
-    return *(uint32_t *)(uintptr_t)(g_esp + 4u + 4u * (uint32_t)i);
-}
+static inline uint32_t hle_a32(int i) { return MEM32(g_esp + 4u + 4u * (uint32_t)i); }
 #define A32(i)   hle_a32(i)                       /* arg i as uint32_t */
-#define APTR(i)  ((void *)(uintptr_t)hle_a32(i))  /* arg i as a pointer */
-#define ASTR(i)  ((char *)(uintptr_t)hle_a32(i))  /* arg i as a char*  */
+#define APTR(i)  ((void *)G2H(hle_a32(i)))        /* arg i as a host pointer into guest memory */
+#define ASTR(i)  ((char *)G2H(hle_a32(i)))        /* arg i as a char*  */
 
 /* Return from a stdcall shim: set eax and pop ret + argc args. Every shim ends
  * in exactly one of these; the argc is the callee's own purge. */
 #define RET(eax, argc)   do { g_eax = (uint32_t)(eax); g_esp += 4u + 4u * (uint32_t)(argc); return; } while (0)
 #define RETV(argc)       RET(0, argc)                       /* void-returning (eax undefined) */
-#define RETP(ptr, argc)  RET((uint32_t)(uintptr_t)(ptr), argc)
+#define RETP(ptr, argc)  RET(H2G(ptr), argc)              /* a host pointer into guest memory */
 
 /* ---- shim registry ----
  * A shim is named by the Win32 symbol it answers. The host assigns each a
@@ -173,6 +203,8 @@ void  hle_set_command_line(const char *cmdline);   /* what GetCommandLineA answe
 extern void (*hle_on_exit)(int code);              /* run by ExitProcess before the process goes */
 void  hle_exit(int code);                          /* flush and leave, once */
 uint32_t hle_thread_id(void);                      /* GetCurrentThreadId's answer for this thread */
+uint32_t hle_thread_new_id(void);                  /* an id for a thread about to start... */
+void     hle_thread_adopt_id(uint32_t id);         /* ...which that thread takes as its own */
 uint32_t hle_ticks_ms(void);                       /* GetTickCount */
 void *hle_alloc(uint32_t n);                       /* a zeroed heap block (HeapFree-able) */
 void  hle_free(void *p);

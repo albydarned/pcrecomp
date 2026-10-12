@@ -49,21 +49,21 @@ void hle_com_register_class(const uint8_t *clsid, uint32_t (*create)(const uint8
     if (g_nclass < MAX_CLASSES) memcpy(g_class[g_nclass].clsid, clsid, 16), g_class[g_nclass++].create = create;
 }
 
-/* A vtable of shim VAs, in guest-readable memory (it lives for the run). */
+/* A vtable of shim VAs, in guest memory (it lives for the run). */
 uint32_t hle_com_vtable(const win32hle_shim *methods) {
     int n = 0;
     while (methods[n].name) n++;
-    uint32_t *vt = (uint32_t *)calloc((size_t)n + 1, 4);
+    uint32_t vt = hle_guest_alloc(4u * (uint32_t)(n + 1));
     win32hle_register(methods);
-    for (int i = 0; i < n; i++) vt[i] = hle_resolve(methods[i].name);
-    return (uint32_t)(uintptr_t)vt;
+    for (int i = 0; i < n; i++) MEM32(vt + 4u * (uint32_t)i) = hle_resolve(methods[i].name);
+    return vt;
 }
 /* An object: the vtable pointer, a reference count, then `size` - 8 bytes of
  * the host's own state. */
 uint32_t hle_com_new(uint32_t vtable, uint32_t size) {
-    uint32_t *o = (uint32_t *)calloc(1, size < 8 ? 8 : size);
-    o[0] = vtable, o[1] = 1;
-    return (uint32_t)(uintptr_t)o;
+    uint32_t o = hle_guest_alloc(size < 8 ? 8 : size);
+    MEM32(o) = vtable, MEM32(o + 4) = 1;
+    return o;
 }
 /* IUnknown for such objects: any interface is this one (a host serves one
  * interface per object), counted at +4, freed at zero. */
@@ -76,7 +76,7 @@ void hle_com_QueryInterface(void) {                      /* (this, iid, &out) */
 void hle_com_AddRef(void) { RET(++MEM32(A32(0) + 4), 1); }
 void hle_com_Release(void) {
     uint32_t self = A32(0), n = --MEM32(self + 4);
-    if (!n) free((void *)(uintptr_t)self);
+    if (!n) hle_guest_free(self);
     RET(n, 1);
 }
 
@@ -102,11 +102,12 @@ static void o_CoCreateInstance(void) {                   /* (clsid, outer, ctx, 
         if (!memcmp(g_class[i].clsid, clsid, 16)) RET(g_class[i].create((const uint8_t *)APTR(3), (uint32_t *)APTR(4)), 5);
     for (int i = 0; clsid && i < MAX_GUEST_CLASSES; i++)
         if (g_guest_class[i].unk && !memcmp(g_guest_class[i].clsid, clsid, 16)) {
-            static uint32_t cf;                          /* (re-entrant enough: read before the next call) */
-            uint32_t qi[2] = { (uint32_t)(uintptr_t)IID_IClassFactory, (uint32_t)(uintptr_t)&cf };
+            static uint32_t cf;                          /* a guest cell for the factory (re-entrant enough: read before the next call) */
+            if (!cf) cf = hle_guest_alloc(4);
+            uint32_t qi[2] = { hle_guest_static(IID_IClassFactory, 16), cf };
             uint32_t hr = vcall(g_guest_class[i].unk, 0, 2, qi);           /* QueryInterface */
             if (hr) RET(hr, 5);
-            uint32_t f = cf, ci[3] = { A32(1), A32(3), A32(4) };
+            uint32_t f = MEM32(cf), ci[3] = { A32(1), A32(3), A32(4) };
             hr = vcall(f, 3, 3, ci);                                        /* IClassFactory::CreateInstance */
             vcall(f, 2, 0, NULL);                                           /* Release */
             RET(hr, 5);
@@ -169,7 +170,7 @@ static void o_StringFromCLSID(void) {                    /* (clsid, &wide string
     uint16_t *w = (uint16_t *)hle_alloc(80);
     hle_guid_string((const uint8_t *)APTR(0), s);
     for (int i = 0; i < 39; i++) w[i] = (uint8_t)s[i];
-    if (A32(1)) MEM32(A32(1)) = (uint32_t)(uintptr_t)w;
+    if (A32(1)) MEM32(A32(1)) = H2G(w);
     RET(S_OK, 2);
 }
 /* OleRun: an object a host serves is in process, so always running. */

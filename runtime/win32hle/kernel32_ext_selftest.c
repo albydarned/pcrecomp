@@ -33,9 +33,8 @@ static char     g_sec[]   = "video";
 static char     g_key[]   = "width";
 static char     g_val[]   = "1024";
 static uint8_t  g_payload[16] = { 1,2,3,4,5,6,7,8, 9,10,11,12,13,14,15,16 };
-static uint8_t  g_readbuf[16];
-static char     g_inibuf[64];
-static uint32_t g_io;     /* bytes read/written out-param */
+/* ...and in guest memory, where the guest passes and the shims fill them */
+static uint32_t v_path, v_ini, v_sec, v_key, v_val, v_payload, v_readbuf, v_inibuf, v_io;
 
 static int mem_eq;
 static uint32_t g_global_ptr;
@@ -46,25 +45,25 @@ static void guest(void) {
 
     /* h = CreateFileA(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0) */
     PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, CREATE_ALWAYS); PUSH32(esp, 0);
-    PUSH32(esp, 0); PUSH32(esp, GENERIC_WRITE); PUSH32(esp, (uint32_t)(uintptr_t)g_path);
+    PUSH32(esp, 0); PUSH32(esp, GENERIC_WRITE); PUSH32(esp, v_path);
     RECOMP_ICALL(V_Create);
     uint32_t h = eax;
     /* WriteFile(h, payload, 16, &io, 0) */
-    PUSH32(esp, 0); PUSH32(esp, (uint32_t)(uintptr_t)&g_io); PUSH32(esp, 16);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_payload); PUSH32(esp, h);
+    PUSH32(esp, 0); PUSH32(esp, v_io); PUSH32(esp, 16);
+    PUSH32(esp, v_payload); PUSH32(esp, h);
     RECOMP_ICALL(V_Write);
     PUSH32(esp, h); RECOMP_ICALL(V_Close);
 
     /* h = CreateFileA(path, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0); ReadFile */
     PUSH32(esp, 0); PUSH32(esp, 0); PUSH32(esp, OPEN_EXISTING); PUSH32(esp, 0);
-    PUSH32(esp, 0); PUSH32(esp, GENERIC_READ); PUSH32(esp, (uint32_t)(uintptr_t)g_path);
+    PUSH32(esp, 0); PUSH32(esp, GENERIC_READ); PUSH32(esp, v_path);
     RECOMP_ICALL(V_Create);
     h = eax;
-    PUSH32(esp, 0); PUSH32(esp, (uint32_t)(uintptr_t)&g_io); PUSH32(esp, 16);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_readbuf); PUSH32(esp, h);
+    PUSH32(esp, 0); PUSH32(esp, v_io); PUSH32(esp, 16);
+    PUSH32(esp, v_readbuf); PUSH32(esp, h);
     RECOMP_ICALL(V_Read);
     PUSH32(esp, h); RECOMP_ICALL(V_Close);
-    mem_eq = (g_io == 16) && memcmp(g_payload, g_readbuf, 16) == 0;
+    mem_eq = (MEM32(v_io) == 16) && memcmp(g_payload, G2H(v_readbuf), 16) == 0;
 
     /* p = GlobalAlloc(GMEM_ZEROINIT, 32); GlobalLock(p); write; GlobalFree */
     PUSH32(esp, 32); PUSH32(esp, 0x40); RECOMP_ICALL(V_GAlloc);
@@ -76,14 +75,14 @@ static void guest(void) {
     PUSH32(esp, p); RECOMP_ICALL(V_GFree);
 
     /* WritePrivateProfileStringA(sec,key,val,ini); GetPrivateProfileStringA back */
-    PUSH32(esp, (uint32_t)(uintptr_t)g_ini); PUSH32(esp, (uint32_t)(uintptr_t)g_val);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_key); PUSH32(esp, (uint32_t)(uintptr_t)g_sec);
+    PUSH32(esp, v_ini); PUSH32(esp, v_val);
+    PUSH32(esp, v_key); PUSH32(esp, v_sec);
     RECOMP_ICALL(V_WriteIni);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_ini); PUSH32(esp, 64);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_inibuf); PUSH32(esp, 0 /*default*/);
-    PUSH32(esp, (uint32_t)(uintptr_t)g_key); PUSH32(esp, (uint32_t)(uintptr_t)g_sec);
+    PUSH32(esp, v_ini); PUSH32(esp, 64);
+    PUSH32(esp, v_inibuf); PUSH32(esp, 0 /*default*/);
+    PUSH32(esp, v_key); PUSH32(esp, v_sec);
     RECOMP_ICALL(V_GetIni);
-    ini_ok = strcmp(g_inibuf, "1024") == 0;
+    ini_ok = strcmp((const char *)G2H(v_inibuf), "1024") == 0;
 
     eax = 0;
 }
@@ -107,6 +106,11 @@ int main(void) {
     ok("all kernel32_ext shims resolve",
        V_Create && V_Read && V_Write && V_Close && V_GAlloc && V_GLock && V_GFree && V_WriteIni && V_GetIni);
 
+    v_path = hle_guest_strdup(g_path), v_ini = hle_guest_strdup(g_ini);
+    v_sec = hle_guest_strdup(g_sec), v_key = hle_guest_strdup(g_key), v_val = hle_guest_strdup(g_val);
+    v_payload = hle_guest_static(g_payload, sizeof g_payload);
+    v_readbuf = hle_guest_alloc(16), v_inibuf = hle_guest_alloc(64), v_io = hle_guest_alloc(4);
+
     mach_enter();
     guest();
     mach_leave();
@@ -127,10 +131,16 @@ int main(void) {
         f = fopen("/tmp/hleov/mod/RULES.INI", "w"); fputs("mod", f); fclose(f);
         hle_set_drive('C', "/tmp/hleov/game");
         hle_set_overlay("/tmp/hleov/game", "/tmp/hleov/mod");
-        ok("overlay: the mod's file is read", hle_host_path("C:\\rules.ini", p, sizeof p) && strstr(p, "/mod/RULES.INI"));
+        /* the layer answers real paths (/tmp may be a link, as on macOS) and
+         * keeps a name's case as the disk has it (or as asked, on a disk
+         * without case), so compare that way */
+        char real_game[1024], real_mod[1024], want[1100];
+        realpath("/tmp/hleov/game", real_game), realpath("/tmp/hleov/mod", real_mod);
+        ok("overlay: the mod's file is read", hle_host_path("C:\\rules.ini", p, sizeof p) && strcasestr(p, "/mod/RULES.INI"));
         ok("overlay: the game's where the mod has none", hle_host_path("C:\\maps\\a.map", p, sizeof p) && strstr(p, "/game/maps/a.map"));
         hle_host_path_for_write("C:\\saves\\one.sav", p, sizeof p, 0);
-        ok("overlay: a new file goes to the mod, its directory made", !strcmp(p, "/tmp/hleov/mod/saves/one.sav") &&
+        snprintf(want, sizeof want, "%s/saves/one.sav", real_mod);
+        ok("overlay: a new file goes to the mod, its directory made", !strcmp(p, want) &&
            access("/tmp/hleov/mod/saves", F_OK) == 0);
         hle_host_path_for_write("C:\\maps\\a.map", p, sizeof p, 1);
         f = fopen(p, "r");
@@ -138,9 +148,9 @@ int main(void) {
            strstr(p, "/mod/maps/a.map"));
         if (f) fclose(f);
         ok("overlay: the game's files untouched", access("/tmp/hleov/game/saves", F_OK) != 0);
-        ok("overlay: a directory stays the game's (the cwd)", hle_host_path("C:\\", p, sizeof p) && !strcmp(p, "/tmp/hleov/game"));
+        ok("overlay: a directory stays the game's (the cwd)", hle_host_path("C:\\", p, sizeof p) && !strcmp(p, real_game));
         chdir("/tmp/hleov/game");
-        ok("overlay: a name relative to the game's folder", hle_host_path("rules.ini", p, sizeof p) && strstr(p, "/mod/RULES.INI"));
+        ok("overlay: a name relative to the game's folder", hle_host_path("rules.ini", p, sizeof p) && strcasestr(p, "/mod/RULES.INI"));
         hle_set_overlay(NULL, NULL);
         ok("overlay off: the game's file again", hle_host_path("C:\\rules.ini", p, sizeof p) && strstr(p, "/game/rules.ini"));
     }

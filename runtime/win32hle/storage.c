@@ -331,15 +331,15 @@ static int write_cfb(const char *path, node_t *root) {
 /* ---- the objects ---- */
 static uint32_t g_vt_stg, g_vt_stm;
 typedef struct { file_t *file; node_t *node; uint32_t pos; } obj_t;   /* at +8 of the COM object */
-#define OBJ(self) ((obj_t *)(uintptr_t)MEM32((self) + 8))
+#define OBJ(self) ((obj_t *)G2H(MEM32((self) + 8)))
 
 static void vtables(void);
 static uint32_t new_obj(uint32_t vt, file_t *f, node_t *n) {
-    obj_t *o = (obj_t *)calloc(1, sizeof *o);
+    obj_t *o = (obj_t *)hle_alloc(sizeof *o);            /* in guest memory: the object holds it at +8 */
     o->file = f, o->node = n;
     f->refs++, n->refs++;
     uint32_t c = hle_com_new(vt, 12);
-    MEM32(c + 8) = (uint32_t)(uintptr_t)o;
+    MEM32(c + 8) = H2G(o);
     return c;
 }
 static void commit(file_t *f) {
@@ -356,8 +356,8 @@ static void obj_release(uint32_t self) {
         free_tree(o->file->root);
         free(o->file);
     }
-    free(o);
-    free((void *)(uintptr_t)self);
+    hle_free(o);
+    hle_guest_free(self);
 }
 static void x_Release(void) {
     uint32_t self = A32(0), n = --MEM32(self + 4);
@@ -432,15 +432,15 @@ static void sm_Commit(void) { commit(OBJ(A32(0))->file); RET(S_OK, 2); }
 static void sm_Revert(void) { RET(S_OK, 1); }
 static void sm_LockRegion(void) { RET(S_OK, 6); }
 static void stat_of(uint32_t st, node_t *n, int noname) {   /* STATSTG: name, type, size, 3 times, mode, locks, clsid, state, reserved */
-    memset((void *)(uintptr_t)st, 0, 72);
+    memset(G2H(st), 0, 72);
     if (!noname) {
         uint16_t *w = (uint16_t *)hle_alloc(64);
         memcpy(w, n->name, 62);
-        MEM32(st) = (uint32_t)(uintptr_t)w;
+        MEM32(st) = H2G(w);
     }
     MEM32(st + 4) = n->type == 5 ? 1u : (uint32_t)n->type;
     MEM32(st + 8) = n->type == 2 ? n->size : 0;
-    memcpy((void *)(uintptr_t)(st + 0x38), n->clsid, 16);
+    memcpy(G2H(st + 0x38), n->clsid, 16);
 }
 static void sm_Stat(void) { stat_of(A32(1), OBJ(A32(0))->node, A32(2) & 1); RET(S_OK, 3); }
 static void sm_Clone(void) {
@@ -454,7 +454,7 @@ static void sm_Clone(void) {
 /* IStorage */
 static node_t *named(uint32_t self, uint32_t wname, int type, int create, uint32_t *hr) {
     obj_t *o = OBJ(self);
-    const uint16_t *name = (const uint16_t *)(uintptr_t)wname;
+    const uint16_t *name = (const uint16_t *)G2H(wname);
     node_t *c = find_child(o->node, name);
     *hr = S_OK;
     if (create) {
@@ -534,7 +534,7 @@ static void vtables(void) {
 
 static void wide_path(uint32_t w, char *out, size_t n) {
     char g[1024];
-    const uint16_t *s = (const uint16_t *)(uintptr_t)w;
+    const uint16_t *s = (const uint16_t *)G2H(w);
     size_t k = 0;
     for (; s && s[k] && k + 1 < sizeof g; k++) g[k] = (char)(s[k] < 256 ? s[k] : '_');
     g[k] = 0;
@@ -590,38 +590,39 @@ static uint32_t vcall(uint32_t obj, int slot, int nargs, const uint32_t *args) {
 }
 static void s_OleSaveToStream(void) {                    /* (persist stream, stream) */
     uint32_t ps = A32(0), stm = A32(1);
-    uint8_t clsid[16];                                   /* locals: Save may save objects of its own */
+    uint32_t clsid = hle_guest_alloc(16);                /* a cell of its own: Save may save objects of its own */
+    uint32_t hr;
     if (!ps) {                                           /* a null object: a null class ID */
-        memset(clsid, 0, 16);
-        uint32_t w[3] = { (uint32_t)(uintptr_t)clsid, 16, 0 };
-        RET(vcall(stm, 4, 3, w), 2);
+        uint32_t w[3] = { clsid, 16, 0 };
+        hr = vcall(stm, 4, 3, w);
+    } else {
+        uint32_t a[1] = { clsid };
+        hr = vcall(ps, 3, 1, a);                         /* GetClassID */
+        if (!hr) { uint32_t w[3] = { clsid, 16, 0 }; hr = vcall(stm, 4, 3, w); }
+        if (!hr) { uint32_t s[2] = { stm, 1 }; hr = vcall(ps, 6, 2, s); }
     }
-    uint32_t a[1] = { (uint32_t)(uintptr_t)clsid };
-    uint32_t hr = vcall(ps, 3, 1, a);
-    if (hr) RET(hr, 2);
-    uint32_t w[3] = { (uint32_t)(uintptr_t)clsid, 16, 0 };
-    if ((hr = vcall(stm, 4, 3, w))) RET(hr, 2);
-    uint32_t s[2] = { stm, 1 };
-    RET(vcall(ps, 6, 2, s), 2);
+    hle_guest_free(clsid);
+    RET(hr, 2);
 }
 static void s_OleLoadFromStream(void) {                  /* (stream, iid, &obj) */
     uint32_t stm = A32(0), out = A32(2);
-    uint8_t clsid[16];
     static const uint8_t IID_IPersistStream[16] = { 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0, 0, 0, 0, 0, 0, 0x46 };
-    uint32_t got = 0, r[3] = { (uint32_t)(uintptr_t)clsid, 16, (uint32_t)(uintptr_t)&got };
+    uint32_t t = hle_guest_alloc(24);                    /* the class ID, then two cells: bytes read, the IPersistStream */
+    uint32_t clsid = t, got = t + 16, psc = t + 20;
+    uint32_t r[3] = { clsid, 16, got };
     if (out) MEM32(out) = 0;
     uint32_t hr = vcall(stm, 3, 3, r);
-    if (hr || got != 16) RET(hr ? hr : STG_E_READFAULT, 3);
+    if (hr || MEM32(got) != 16) { hle_guest_free(t); RET(hr ? hr : STG_E_READFAULT, 3); }
     /* CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, iid, out), through the shim */
-    uint32_t cc[5] = { (uint32_t)(uintptr_t)clsid, 0, 1, A32(1), out };
+    uint32_t cc[5] = { clsid, 0, 1, A32(1), out };
     hr = hle_call_guest(hle_resolve("CoCreateInstance"), 5, cc);
-    if (hr) RET(hr, 3);
-    uint32_t ps = 0;
-    uint32_t q[2] = { (uint32_t)(uintptr_t)IID_IPersistStream, (uint32_t)(uintptr_t)&ps };
-    if ((hr = vcall(MEM32(out), 0, 2, q))) RET(hr, 3);
-    uint32_t l[1] = { stm };
+    if (hr) { hle_guest_free(t); RET(hr, 3); }
+    uint32_t q[2] = { hle_guest_static(IID_IPersistStream, 16), psc };
+    if ((hr = vcall(MEM32(out), 0, 2, q))) { hle_guest_free(t); RET(hr, 3); }
+    uint32_t ps = MEM32(psc), l[1] = { stm };
     hr = vcall(ps, 5, 1, l);
     vcall(ps, 2, 0, NULL);
+    hle_guest_free(t);
     RET(hr, 3);
 }
 
