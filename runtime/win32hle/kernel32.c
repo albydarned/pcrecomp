@@ -388,8 +388,10 @@ static int try_take(uint32_t h) {
         s->count--;
         return 1;
     }
-    case HLE_H_THREAD:
-        return 0;                                        /* threads end only at exit */
+    case HLE_H_THREAD: {                                 /* signalled once the thread's routine returned, and stays so */
+        hle_thread_t *t = (hle_thread_t *)hle_handle_obj(h, HLE_H_THREAD);
+        return t && t->done;
+    }
     default:
         return h == 0xFFFFFFFFu || h == 0xFFFFFFFEu ? 0 : -1;   /* this process/thread: never */
     }

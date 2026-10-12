@@ -170,7 +170,19 @@ extern const uint32_t recomp_dispatch_count;
  * For fixed-base mapping, this is 0.
  * ============================================================ */
 
+#if defined(RECOMP_GENERATED_CODE) && !defined(RECOMP_FLAT_MEMORY) && !defined(RECOMP_MEM_BASE_MUTABLE)
+/* To lifted code the base is a constant: the host sets it once, before any
+ * lifted function runs, and never again (win32hle/guest_mem.c). Declared
+ * const here so the compiler keeps it in a register instead of reloading it
+ * after every volatile store, which it would otherwise have to assume may
+ * alias it: that reload was three dependent instructions before most memory
+ * accesses on arm64. The defining unit (host_lite.c) sees it writable;
+ * RECOMP_MEM_BASE_MUTABLE keeps the plain declaration (to measure, or for a
+ * host that moves the base). */
+extern const ptrdiff_t g_mem_base;
+#else
 extern ptrdiff_t g_mem_base;
+#endif
 
 #ifdef RECOMP_FLAT_MEMORY
 /* Guest VAs ARE host addresses (a 32-bit host mapping each module at its own

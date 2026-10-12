@@ -176,6 +176,9 @@ void  hle_present_close(void);
  * takes any). CloseHandle calls the type's closer. */
 enum { HLE_H_FILE = 1, HLE_H_FIND, HLE_H_EVENT, HLE_H_MUTEX, HLE_H_THREAD, HLE_H_SEMAPHORE,
        HLE_H_REGKEY, HLE_H_SOCKET, HLE_H_OTHER };
+/* A thread's object (HLE_H_THREAD): signalled once its routine has
+ * returned, as Windows signals a thread handle; GetExitCodeThread reads it. */
+typedef struct { volatile int done; uint32_t code; } hle_thread_t;
 uint32_t hle_handle_alloc(int type, void *obj);       /* 0 when the table is full */
 void    *hle_handle_obj(uint32_t h, int type);
 int      hle_handle_type(uint32_t h);

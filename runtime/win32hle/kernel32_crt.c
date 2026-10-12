@@ -29,23 +29,32 @@
  * A guest thread runs lifted code, so it enters through hle_call_guest, which
  * takes the machine and gives the thread its own guest stack + TIB. The lifted
  * start routine is stdcall with one argument (lpParameter). */
-struct thread_arg { uint32_t start, param, tid; };
+struct thread_arg { uint32_t start, param, tid; hle_thread_t *obj; };
 static void *thread_trampoline(void *p) {
     struct thread_arg a = *(struct thread_arg *)p; free(p);
     hle_thread_adopt_id(a.tid);
     uint32_t args[1] = { a.param };
-    hle_call_guest(a.start, 1, args);
+    a.obj->code = hle_call_guest(a.start, 1, args);
+    a.obj->done = 1;                           /* a wait on the handle now returns; the object lives on for it */
     return NULL;
 }
 static void k_CreateThread(void) {             /* (sa, stack, start, param, flags, &tid) */
     struct thread_arg *a = (struct thread_arg *)malloc(sizeof *a);
     a->start = A32(2); a->param = A32(3);
+    a->obj = (hle_thread_t *)calloc(1, sizeof *a->obj);
     uint32_t tid = a->tid = hle_thread_new_id();
+    uint32_t h = hle_handle_alloc(HLE_H_THREAD, a->obj);
     pthread_t t;
-    if (pthread_create(&t, NULL, thread_trampoline, a) != 0) { free(a); RET(0, 6); }
+    if (pthread_create(&t, NULL, thread_trampoline, a) != 0) { hle_handle_close(h); free(a->obj); free(a); RET(0, 6); }
     pthread_detach(t);
     uint32_t ptid = A32(5); if (ptid) MEM32(ptid) = tid;
-    RET(hle_handle_alloc(HLE_H_THREAD, NULL), 6);
+    RET(h, 6);
+}
+static void k_GetExitCodeThread(void) {        /* (h, &code): STILL_ACTIVE (259) while it runs */
+    hle_thread_t *t = (hle_thread_t *)hle_handle_obj(A32(0), HLE_H_THREAD);
+    if (!t) { hle_set_last_error(6u /* ERROR_INVALID_HANDLE */); RET(0, 2); }
+    if (A32(1)) MEM32(A32(1)) = t->done ? t->code : 259u;
+    RET(1, 2);
 }
 static void k_SetThreadPriority(void) { RET(1, 2); }
 static void k_GetThreadPriority(void) { RET(0, 1); }
@@ -499,6 +508,7 @@ const win32hle_shim win32hle_kernel32_crt[] = {
     { "RaiseException",               k_RaiseException },
     { "LoadModule",                   k_LoadModule },
     { "CreateThread",                 k_CreateThread },
+    { "GetExitCodeThread",            k_GetExitCodeThread },
     { "SetThreadPriority",            k_SetThreadPriority },
     { "GetThreadPriority",            k_GetThreadPriority },
     { "GetCurrentThread",             k_GetCurrentThread },

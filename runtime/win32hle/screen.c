@@ -290,14 +290,26 @@ static void update_cursor(void) {
     was_shown = show;
 }
 
+/* The window's close button (or Cmd-Q): WM_CLOSE to the game, which may save
+ * its settings and quit on its own, and after a grace period the process
+ * leaves anyway, as the Windows presenter does: a game that ignores WM_CLOSE,
+ * or takes long over its fade-out, is not what a player closing the window
+ * wants to wait for. */
+static uint32_t g_close_asked;
 void hle_screen_pump(void) {
     SDL_Event e;
     if (g_win) update_cursor();
+    if (g_close_asked && hle_ticks_ms() - g_close_asked > 3000) {
+        fprintf(stderr, "[screen] the window was closed: leaving\n");
+        hle_exit(0);
+    }
     while (g_win && SDL_PollEvent(&e)) {
         switch (e.type) {
         case SDL_QUIT: {
             uint32_t h = hle_first_hwnd();
-            if (h) hle_post_message(h, WM_CLOSE, 0, 0); else hle_exit(0);
+            if (!h || g_close_asked) hle_exit(0);
+            hle_post_message(h, WM_CLOSE, 0, 0);
+            g_close_asked = hle_ticks_ms() ? hle_ticks_ms() : 1;
             break;
         }
         case SDL_KEYDOWN: case SDL_KEYUP: {
