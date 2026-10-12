@@ -216,15 +216,40 @@ static void k_FlushInstructionCache(void) { RET(1, 3); }
  * same either way, so the oldest paths. */
 static void k_IsProcessorFeaturePresent(void) { RET(0, 1); }
 
+/* --- a polling guest ---
+ * A game of this era spins: PeekMessage until a message comes, the clock
+ * until the next frame is due, Sleep(0) until another thread is done. On
+ * Windows that is a core at 100%; here, after a burst of such calls inside
+ * one millisecond, the host sleeps a little with the machine given up (a
+ * timer or sound thread runs meanwhile). A frame due in 8 ms is still met
+ * within a tenth of one; a key or click waits at most a millisecond.
+ * HLE_NO_THROTTLE=1 turns it off, to measure against. */
+void hle_poll(int kind) {
+    static __thread uint32_t burst[HLE_POLL_KINDS];
+    static __thread uint64_t since[HLE_POLL_KINDS];
+    static int off = -1;
+    if (off < 0) off = getenv("HLE_NO_THROTTLE") != NULL;
+    if (off || kind < 0 || kind >= HLE_POLL_KINDS) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+    if (now - since[kind] > 1000) { since[kind] = now; burst[kind] = 0; return; }
+    if (++burst[kind] < 64) return;
+    burst[kind] = 0, since[kind] = now;
+    hle_block_begin();
+    usleep(kind == HLE_POLL_MESSAGE ? 1000 : 100);
+    hle_block_end();
+}
+
 /* --- time --- */
 static uint32_t ticks_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u);
 }
 uint32_t hle_ticks_ms(void) { return ticks_ms(); }
-static void k_GetTickCount(void) { RET(ticks_ms(), 0); }
+static void k_GetTickCount(void) { hle_poll(HLE_POLL_TIME); RET(ticks_ms(), 0); }
 static void k_QueryPerformanceFrequency(void) { if (A32(0)) MEM32(A32(0)) = 1000000u, MEM32(A32(0) + 4) = 0; RET(1, 1); }
 static void k_QueryPerformanceCounter(void) {
+    hle_poll(HLE_POLL_TIME);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t us = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
     if (A32(0)) MEM32(A32(0)) = (uint32_t)us, MEM32(A32(0) + 4) = (uint32_t)(us >> 32);
@@ -234,12 +259,13 @@ static void k_QueryPerformanceCounter(void) {
  * a timer callback) runs meanwhile. Sleep(0) is a yield. */
 static void k_Sleep(void) {
     uint32_t ms = A32(0);
+    if (!ms) hle_poll(HLE_POLL_YIELD);
     hle_block_begin();
     if (ms) usleep(ms * 1000u); else sched_yield();
     hle_block_end();
     RETV(1);
 }
-static void k_SleepEx(void) { uint32_t ms = A32(0); hle_block_begin(); if (ms) usleep(ms * 1000u); else sched_yield(); hle_block_end(); RET(0, 2); }
+static void k_SleepEx(void) { uint32_t ms = A32(0); if (!ms) hle_poll(HLE_POLL_YIELD); hle_block_begin(); if (ms) usleep(ms * 1000u); else sched_yield(); hle_block_end(); RET(0, 2); }
 
 /* --- strings (KERNEL32's lstr*; the CRT has the rest) --- */
 static void k_lstrlenA(void) { char *s = ASTR(0); RET(s ? (uint32_t)strlen(s) : 0u, 1); }

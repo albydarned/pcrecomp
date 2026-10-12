@@ -20,6 +20,7 @@
 
 /* --- multimedia timer --- */
 static void m_timeGetTime(void) {
+    hle_poll(HLE_POLL_TIME);
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     RET((uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u), 0);
 }

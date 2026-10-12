@@ -209,6 +209,12 @@ uint32_t hle_thread_id(void);                      /* GetCurrentThreadId's answe
 uint32_t hle_thread_new_id(void);                  /* an id for a thread about to start... */
 void     hle_thread_adopt_id(uint32_t id);         /* ...which that thread takes as its own */
 uint32_t hle_ticks_ms(void);                       /* GetTickCount */
+/* A polling guest (kernel32.c): a shim the game spins on (PeekMessage with
+ * nothing there, the clock while a frame is not yet due, Sleep(0)) calls
+ * this; after a burst of such calls inside a millisecond the host sleeps a
+ * little, the machine given up, so the spin costs no core. */
+enum { HLE_POLL_MESSAGE, HLE_POLL_TIME, HLE_POLL_YIELD, HLE_POLL_KINDS };
+void  hle_poll(int kind);
 void *hle_alloc(uint32_t n);                       /* a zeroed heap block (HeapFree-able) */
 void  hle_free(void *p);
 void  hle_enter_cs(uint32_t cs);                   /* a guest CRITICAL_SECTION */

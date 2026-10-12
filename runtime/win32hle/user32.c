@@ -519,7 +519,7 @@ static void u_PeekMessageA(void) {                       /* (msg, hwnd, min, max
     int remove = A32(4) & 1;
     if (!next_message(&m, A32(1), A32(2), A32(3), remove)) {
         pump();
-        if (!next_message(&m, A32(1), A32(2), A32(3), remove)) RET(0, 5);
+        if (!next_message(&m, A32(1), A32(2), A32(3), remove)) { hle_poll(HLE_POLL_MESSAGE); RET(0, 5); }
     }
     put_msg(A32(0), &m);
     RET(1, 5);
