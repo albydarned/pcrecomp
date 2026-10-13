@@ -273,6 +273,8 @@ extern const win32hle_shim win32hle_bink[];           /* binkw32 on ffmpeg (bink
  * itself as the pump hook. headless: no window (a script drives input). */
 int  hle_screen_open(const char *title, int fullscreen, int headless);
 void hle_screen_pump(void);
+void hle_screen_request_close(void);      /* Cmd-Q or the close button: WM_CLOSE, and the process leaves within 3 s whatever the game does (machine held) */
+extern void (*hle_screen_abandon_hook)(void);   /* the 3 s passed and the game is still running: the host may say where it is */
 extern int (*hle_screen_key_hook)(int sdl_scancode, int down);   /* nonzero: the host took the key */
 void hle_screen_title(const char *title);
 extern int (*hle_screen_cursor_hook)(void);   /* nonzero: show the cursor the guest set (its Win32 menus); unset: the game draws its own */

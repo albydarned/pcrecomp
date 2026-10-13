@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <SDL2/SDL.h>
 #include "win32hle.h"
 
@@ -294,28 +296,57 @@ static void update_cursor(void) {
  * its settings and quit on its own, and after a grace period the process
  * leaves anyway, as the Windows presenter does: a game that ignores WM_CLOSE,
  * or takes long over its fade-out, is not what a player closing the window
- * wants to wait for. */
-static uint32_t g_close_asked;
+ * wants to wait for.
+ *
+ * The grace period is kept by a thread of the host's, not by a check in the
+ * pump: a game that stops pumping once it is told to close (it waits for a
+ * worker that never ends, or sits in its fade-out) would never run that
+ * check, and the player would be left with a window that answers nothing but
+ * a force-quit. The thread tells the host first (hle_screen_abandon_hook),
+ * so the host can say where the game was. */
+static int g_close_asked;
+void (*hle_screen_abandon_hook)(void);
+static void *close_timer(void *arg) {
+    (void)arg;
+    usleep(3000 * 1000);
+    fprintf(stderr, "[screen] 3 s after the close and the game is still running: leaving\n");
+    if (hle_screen_abandon_hook) hle_screen_abandon_hook();
+    hle_exit(0);
+    return NULL;
+}
+/* Called with the machine held (from the pump, or a host thread inside mach_enter). */
+void hle_screen_request_close(void) {
+    uint32_t h = hle_first_hwnd();
+    if (!h || g_close_asked) { fprintf(stderr, "[screen] close asked again: leaving now\n"); hle_exit(0); }
+    fprintf(stderr, "[screen] close asked: WM_CLOSE to window 0x%08X; leaving in 3 s at the latest\n", h);
+    hle_post_message(h, WM_CLOSE, 0, 0);
+    g_close_asked = 1;
+    pthread_t t;
+    if (pthread_create(&t, NULL, close_timer, NULL) == 0) pthread_detach(t);
+    else hle_exit(0);
+}
 void hle_screen_pump(void) {
     SDL_Event e;
     if (g_win) update_cursor();
-    if (g_close_asked && hle_ticks_ms() - g_close_asked > 3000) {
-        fprintf(stderr, "[screen] the window was closed: leaving\n");
-        hle_exit(0);
-    }
     while (g_win && SDL_PollEvent(&e)) {
         switch (e.type) {
-        case SDL_QUIT: {
-            uint32_t h = hle_first_hwnd();
-            if (!h || g_close_asked) hle_exit(0);
-            hle_post_message(h, WM_CLOSE, 0, 0);
-            g_close_asked = hle_ticks_ms() ? hle_ticks_ms() : 1;
+        case SDL_QUIT:
+            hle_screen_request_close();
             break;
-        }
         case SDL_KEYDOWN: case SDL_KEYUP: {
             SDL_Scancode sc = e.key.keysym.scancode;
             /* a key the host keeps for itself (a mod switch): the game never sees it */
             if (hle_screen_key_hook && hle_screen_key_hook((int)sc, e.type == SDL_KEYDOWN)) break;
+#ifdef __APPLE__
+            /* Cmd-Q is the Mac's quit. SDL's own menu turns it into SDL_QUIT
+             * when the menu gets it; when the key reaches the window instead
+             * (a fullscreen window, a process started by another app), it is
+             * the same request. */
+            if (sc == SDL_SCANCODE_Q && (e.key.keysym.mod & KMOD_GUI)) {
+                if (e.type == SDL_KEYDOWN) { fprintf(stderr, "[screen] Cmd-Q\n"); hle_screen_request_close(); }
+                break;
+            }
+#endif
             /* the presenter's keys, the Windows build's: they do not reach the game */
             if ((sc == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT)) || sc == SDL_SCANCODE_F11) {
                 if (e.type == SDL_KEYDOWN) {
