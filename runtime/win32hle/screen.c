@@ -325,13 +325,36 @@ void hle_screen_request_close(void) {
     if (pthread_create(&t, NULL, close_timer, NULL) == 0) pthread_detach(t);
     else hle_exit(0);
 }
+/* "Are you sure?": a quit by Cmd-Q or the close button asks first, in the
+ * system's own box over the window (the game has no window message for a
+ * close it would answer with a question of its own). The box is modal on
+ * the game's thread, so the game stands still while it is up; a no leaves
+ * the game as it was. Runs with the machine held, from the pump. */
+static void ask_quit(const char *how) {
+    if (g_close_asked) return;                           /* already on the way out */
+    if (!g_win) { hle_screen_request_close(); return; }
+    static const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Quit" },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel" },
+    };
+    char text[160];
+    snprintf(text, sizeof text, "Quit %s? A game in progress is not saved.", SDL_GetWindowTitle(g_win));
+    SDL_MessageBoxData box = { SDL_MESSAGEBOX_WARNING, g_win, SDL_GetWindowTitle(g_win), text,
+                               (int)(sizeof buttons / sizeof buttons[0]), buttons, NULL };
+    int was_shown = SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE, answer = 1;
+    SDL_ShowCursor(SDL_ENABLE);                          /* the game hides the system cursor; the box needs it */
+    if (SDL_ShowMessageBox(&box, &answer) != 0) { fprintf(stderr, "[screen] no message box (%s): leaving\n", SDL_GetError()); answer = 1; }
+    SDL_ShowCursor(was_shown ? SDL_ENABLE : SDL_DISABLE);
+    fprintf(stderr, "[screen] %s: %s\n", how, answer ? "quit" : "cancelled");
+    if (answer) hle_screen_request_close();
+}
 void hle_screen_pump(void) {
     SDL_Event e;
     if (g_win) update_cursor();
     while (g_win && SDL_PollEvent(&e)) {
         switch (e.type) {
         case SDL_QUIT:
-            hle_screen_request_close();
+            ask_quit("close");
             break;
         case SDL_KEYDOWN: case SDL_KEYUP: {
             SDL_Scancode sc = e.key.keysym.scancode;
@@ -343,7 +366,7 @@ void hle_screen_pump(void) {
              * (a fullscreen window, a process started by another app), it is
              * the same request. */
             if (sc == SDL_SCANCODE_Q && (e.key.keysym.mod & KMOD_GUI)) {
-                if (e.type == SDL_KEYDOWN) { fprintf(stderr, "[screen] Cmd-Q\n"); hle_screen_request_close(); }
+                if (e.type == SDL_KEYDOWN) ask_quit("Cmd-Q");
                 break;
             }
 #endif
