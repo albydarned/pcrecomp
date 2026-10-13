@@ -151,6 +151,24 @@ int main(void) {
         ok("overlay: a directory stays the game's (the cwd)", hle_host_path("C:\\", p, sizeof p) && !strcmp(p, real_game));
         chdir("/tmp/hleov/game");
         ok("overlay: a name relative to the game's folder", hle_host_path("rules.ini", p, sizeof p) && strcasestr(p, "/mod/RULES.INI"));
+        /* A read-only layer (an asset pack's built files) under the mod's:
+         * read where the mod has no copy, never written to, and listed. */
+        system("mkdir -p /tmp/hleov/pack && echo pack > /tmp/hleov/pack/art.shp && echo packrules > /tmp/hleov/pack/rules.ini");
+        ok("layer: added under the base", hle_add_overlay("/tmp/hleov/pack"));
+        ok("layer: its file is read where the mod has none", hle_host_path("C:\\art.shp", p, sizeof p) && strstr(p, "/pack/art.shp"));
+        ok("layer: the mod's copy wins", hle_host_path("C:\\rules.ini", p, sizeof p) && strcasestr(p, "/mod/RULES.INI"));
+        hle_host_path_for_write("C:\\art.shp", p, sizeof p, 0);
+        ok("layer: a write goes to the mod, not the layer", strstr(p, "/mod/art.shp") != NULL);
+        {   /* the listing: the mod's, the pack's, the game's, each name once */
+            char layers[4][1024];
+            ok("layer: both layers answer for the game's folder", hle_overlay_layers(real_game, layers, 4) == 2 &&
+               !strcmp(layers[0], real_mod) && strstr(layers[1], "/pack"));
+        }
+        hle_set_overlay("/tmp/hleov/game", NULL);
+        ok("layer: a base without a mod takes layers", hle_add_overlay("/tmp/hleov/pack") &&
+           hle_host_path("C:\\art.shp", p, sizeof p) && strstr(p, "/pack/art.shp"));
+        hle_host_path_for_write("C:\\saves\\two.sav", p, sizeof p, 0);
+        ok("layer: without a mod a write goes to the game's folder", strstr(p, "/game/saves/two.sav") != NULL);
         hle_set_overlay(NULL, NULL);
         ok("overlay off: the game's file again", hle_host_path("C:\\rules.ini", p, sizeof p) && strstr(p, "/game/rules.ini"));
     }

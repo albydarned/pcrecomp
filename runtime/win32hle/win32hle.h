@@ -194,7 +194,9 @@ int  hle_host_path(const char *guest, char *out, size_t n);
 /* A mod's folder over the game's: reads look in overlay first, writes go
  * there, directory listings show both (hle_path.c). NULL turns it off. */
 void hle_set_overlay(const char *base, const char *overlay);
-int  hle_overlay_of(const char *host, char *out, size_t n);       /* -1: not under base; else whether it exists there */
+int  hle_overlay_of(const char *host, char *out, size_t n);       /* the mod's path for host; -1: not under base, else whether it exists */
+int  hle_add_overlay(const char *dir);                            /* a read-only layer under the same base (an asset pack); 1 if added */
+int  hle_overlay_layers(const char *host, char out[][1024], int max);   /* every layer's path for host, the mod's first */
 int  hle_host_path_for_write(const char *guest, char *out, size_t n, int keep);
 int  hle_host_path_base(const char *guest, char *out, size_t n);  /* ignoring the overlay */
 void hle_guest_path(const char *host, char *out, size_t n);

@@ -392,19 +392,20 @@ static void k_CopyFileA(void) {                          /* (src, dst, failIfExi
 }
 
 /* ---- FindFirstFileA / FindNextFileA ---- */
-/* A directory search. Under a mod's overlay it lists the overlay's directory
- * first (d), then the game's (base) without the names the overlay had. */
+/* A directory search. Under an overlay it lists each layer's directory
+ * first (the mod's, then the read-only ones), then the game's, without the
+ * names an earlier one had. */
+#define FIND_DIRS 5
 typedef struct {
-    DIR *d, *base;
-    char dir[1024], base_dir[1024], mask[260];
-    int dots;
+    DIR *d[FIND_DIRS];                 /* the layers, then the game's; NULL once read through */
+    char dir[FIND_DIRS][1024], mask[260];
+    int ndirs, at, dots;
     char (*shown)[260];
     int nshown;
 } hfind;
 static void find_closer(void *o) {
     hfind *f = (hfind *)o;
-    if (f->d) closedir(f->d);
-    if (f->base) closedir(f->base);
+    for (int i = 0; i < f->ndirs; i++) if (f->d[i]) closedir(f->d[i]);
     free(f->shown);
     free(f);
 }
@@ -451,21 +452,20 @@ static int shown_already(hfind *f, const char *name) {
 
 static int find_next(hfind *f, uint32_t out) {
     struct dirent *e;
-    while (f->d && (e = readdir(f->d))) {
-        int dot = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
-        if (dot && !f->dots) continue;
-        if (!wild(f->mask, e->d_name)) continue;
-        if (f->base) {                                   /* remember it: the game's copy is hidden */
-            if (f->nshown % 64 == 0) f->shown = realloc(f->shown, sizeof *f->shown * (size_t)(f->nshown + 64));
-            snprintf(f->shown[f->nshown++], 260, "%s", e->d_name);
+    for (; f->at < f->ndirs; f->at++) {
+        int last = f->at == f->ndirs - 1;
+        while (f->d[f->at] && (e = readdir(f->d[f->at]))) {
+            int dot = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
+            if (dot && !f->dots) continue;
+            if (!wild(f->mask, e->d_name)) continue;
+            if (f->at && shown_already(f, e->d_name)) continue;   /* an earlier layer had it */
+            if (!last) {                                 /* remember it: a later copy is hidden */
+                if (f->nshown % 64 == 0) f->shown = realloc(f->shown, sizeof *f->shown * (size_t)(f->nshown + 64));
+                snprintf(f->shown[f->nshown++], 260, "%s", e->d_name);
+            }
+            fill_find(out, f->dir[f->at], e->d_name);
+            return 1;
         }
-        fill_find(out, f->dir, e->d_name);
-        return 1;
-    }
-    while (f->base && (e = readdir(f->base))) {
-        if (!wild(f->mask, e->d_name) || shown_already(f, e->d_name)) continue;
-        fill_find(out, f->base_dir, e->d_name);
-        return 1;
     }
     return 0;
 }
@@ -481,11 +481,16 @@ static void k_FindFirstFileA(void) {                     /* (pattern, &data) */
     char gdir[1024];
     snprintf(gdir, sizeof gdir, "%.*s", (int)(sl - pat), pat);
     if (!gdir[0]) snprintf(gdir, sizeof gdir, ".");
-    hle_host_path_base(gdir, f->dir, sizeof f->dir);
-    char overlay_dir[1024];
-    if (hle_overlay_of(f->dir, overlay_dir, sizeof overlay_dir) == 1 && (f->base = opendir(f->dir))) {
-        snprintf(f->base_dir, sizeof f->base_dir, "%s", f->dir);
-        snprintf(f->dir, sizeof f->dir, "%s", overlay_dir);
+    {   /* the directories to read: each layer's copy that exists, then the game's */
+        char base_dir[1024], layers[FIND_DIRS - 1][1024];
+        hle_host_path_base(gdir, base_dir, sizeof base_dir);
+        int n = hle_overlay_layers(base_dir, layers, FIND_DIRS - 1);
+        for (int i = 0; i < n; i++) {
+            DIR *d = opendir(layers[i]);
+            if (d) f->d[f->ndirs] = d, snprintf(f->dir[f->ndirs], sizeof f->dir[0], "%s", layers[i]), f->ndirs++;
+        }
+        snprintf(f->dir[f->ndirs], sizeof f->dir[0], "%s", base_dir);
+        f->ndirs++;                                      /* the game's: opened below */
     }
     snprintf(f->mask, sizeof f->mask, "%s", sl);
     f->dots = strchr(f->mask, '*') || strchr(f->mask, '?');
@@ -504,13 +509,13 @@ static void k_FindFirstFileA(void) {                     /* (pattern, &data) */
         hle_set_last_error(ERROR_FILE_NOT_FOUND);
         RET(INVALID_HANDLE, 2);
     }
-    f->d = opendir(f->dir);
-    if (!f->d || !find_next(f, A32(1))) {
+    f->d[f->ndirs - 1] = opendir(f->dir[f->ndirs - 1]);
+    if (!find_next(f, A32(1))) {
         find_closer(f);
         hle_set_last_error(ERROR_FILE_NOT_FOUND);
         RET(INVALID_HANDLE, 2);
     }
-    if (hle_filetrace()) fprintf(stderr, "[file] FindFirstFileA \"%s\" in %s\n", pat, f->dir);
+    if (hle_filetrace()) fprintf(stderr, "[file] FindFirstFileA \"%s\" in %s\n", pat, f->dir[f->ndirs - 1]);
     uint32_t h = hle_handle_alloc(HLE_H_FIND, f);
     RET(h ? h : INVALID_HANDLE, 2);
 }

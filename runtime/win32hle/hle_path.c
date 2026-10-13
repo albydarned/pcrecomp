@@ -72,22 +72,47 @@ static int join_component(char *out, size_t n, const char *comp, size_t clen) {
     return found;
 }
 
-/* ---- an overlay: a mod's folder laid over the game's ----
+/* ---- overlays: a mod's folder laid over the game's, and read-only layers ----
  *
  * With hle_set_overlay(base, overlay), a file under base is looked for in
  * overlay first (at the same relative path, without case), so a mod's
  * rules.ini or map is read instead of the game's. Writes to files under base
  * go to the overlay (hle_host_path_for_write), so playing a mod never changes
- * the game's own files; FindFirstFileA lists both, the overlay's first. */
-static char *g_overlay_base, *g_overlay;
+ * the game's own files; FindFirstFileA lists both, the overlay's first.
+ *
+ * hle_add_overlay(dir) adds a read-only layer under the same base (an asset
+ * pack's built sprites): reads look in the mod's layer, then each read-only
+ * layer in the order added, then the game's folder. Writes never go to a
+ * read-only layer: to the mod's when there is one, else the game's folder. */
+#define MAX_LAYERS 4
+static char *g_overlay_base;
+static char *g_layers[MAX_LAYERS];     /* [0] the writable one (a mod), or NULL; then read-only */
+static int g_nlayers;
 
-void hle_set_overlay(const char *base, const char *overlay) {
-    free(g_overlay_base), free(g_overlay);
-    g_overlay_base = base && overlay ? realpath(base, NULL) : NULL;
-    g_overlay = base && overlay ? realpath(overlay, NULL) : NULL;
-    if (!g_overlay_base || !g_overlay) free(g_overlay_base), free(g_overlay), g_overlay_base = g_overlay = NULL;
+static void layers_clear(void) {
+    for (int i = 0; i < MAX_LAYERS; i++) free(g_layers[i]), g_layers[i] = NULL;
+    free(g_overlay_base), g_overlay_base = NULL;
+    g_nlayers = 0;
 }
 
+void hle_set_overlay(const char *base, const char *overlay) {
+    layers_clear();
+    if (!base) return;
+    g_overlay_base = realpath(base, NULL);
+    if (!g_overlay_base) return;
+    g_layers[0] = overlay ? realpath(overlay, NULL) : NULL;
+    g_nlayers = 1;
+}
+
+int hle_add_overlay(const char *dir) {
+    if (!g_overlay_base || !dir || g_nlayers >= MAX_LAYERS) return 0;
+    char *real = realpath(dir, NULL);
+    if (!real) return 0;
+    g_layers[g_nlayers++] = real;
+    return 1;
+}
+
+/* host as an absolute path, if it is relative (to the cwd). */
 /* host as an absolute path, if it is relative (to the cwd). */
 static void absolute(const char *host, char *out, size_t n) {
     char cwd[768];
@@ -102,13 +127,16 @@ static int under(const char *path, const char *dir) {
     return !strncmp(path, dir, l) && (path[l] == '/' || !path[l]);
 }
 
-int hle_overlay_of(const char *host, char *out, size_t n) {
+/* The path of host inside layer k: -1 when host is not under base (or is in
+ * a layer itself), else whether it exists there. */
+static int layer_path(int k, const char *host, char *out, size_t n) {
     char abs[1024];
     out[0] = 0;
-    if (!g_overlay) return -1;
+    if (!g_overlay_base || k >= g_nlayers || !g_layers[k]) return -1;
     absolute(host, abs, sizeof abs);
-    if (under(abs, g_overlay) || !under(abs, g_overlay_base)) return -1;
-    snprintf(out, n, "%s", g_overlay);
+    for (int i = 0; i < g_nlayers; i++) if (g_layers[i] && under(abs, g_layers[i])) return -1;
+    if (!under(abs, g_overlay_base)) return -1;
+    snprintf(out, n, "%s", g_layers[k]);
     const char *p = abs + strlen(g_overlay_base);
     int exists = 1;
     while (*p) {
@@ -121,19 +149,41 @@ int hle_overlay_of(const char *host, char *out, size_t n) {
     return exists;
 }
 
+/* The writable layer's path for host (the mod's). */
+int hle_overlay_of(const char *host, char *out, size_t n) { return layer_path(0, host, out, n); }
+
+/* Every layer's path for host, the mod's first: how many (0 when host is
+ * not under base). */
+int hle_overlay_layers(const char *host, char out[][1024], int max) {
+    int n = 0;
+    for (int k = 0; k < g_nlayers && n < max; k++)
+        if (layer_path(k, host, out[n], 1024) >= 0) n++;
+    return n;
+}
+
 /* The path a write to guest should go to: the overlay's copy when the file is
  * the game's (its directories made; with keep, the game's file copied there
  * first, so a write into the middle of it keeps the rest). */
+static int host_path_plain(const char *guest, char *out, size_t n);
+
 int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
-    int exists = hle_host_path(guest, out, n);
-    char ov[1024];
-    if (hle_overlay_of(out, ov, sizeof ov) < 0) return exists;
-    for (char *s = ov + strlen(g_overlay); *s && (s = strchr(s + 1, '/')); ) {   /* mkdir -p its directory */
+    int exists = hle_host_path(guest, out, n);        /* as it is read: a layer's copy or the game's */
+    char plain[1024], abs[1024], ov[1024];
+    struct stat st;
+    host_path_plain(guest, plain, sizeof plain);
+    if (!plain[0]) return exists;
+    absolute(plain, abs, sizeof abs);
+    if (!g_overlay_base || !under(abs, g_overlay_base)) return exists;   /* not the game's: as read */
+    if (hle_overlay_of(abs, ov, sizeof ov) < 0) {       /* no mod: the game's own file, never a read-only layer's */
+        snprintf(out, n, "%s", abs);
+        return stat(out, &st) == 0;
+    }
+    for (char *s = ov + strlen(g_layers[0]); *s && (s = strchr(s + 1, '/')); ) {   /* mkdir -p its directory */
         *s = 0;
         mkdir(ov, 0755);
         *s = '/';
     }
-    if (keep && exists) {
+    if (keep && exists && strcmp(out, ov)) {           /* the copy read (a layer's or the game's) into the mod first */
         FILE *in = fopen(out, "rb"), *to = in ? fopen(ov, "wb") : NULL;
         char buf[65536];
         size_t r;
@@ -145,18 +195,17 @@ int hle_host_path_for_write(const char *guest, char *out, size_t n, int keep) {
     return keep && exists;
 }
 
-static int host_path_plain(const char *guest, char *out, size_t n);
-
 int hle_host_path(const char *guest, char *out, size_t n) {
     int exists = host_path_plain(guest, out, n);
     char ov[1024];
     struct stat st;
     /* A file only: a directory stays the game's (the cwd is set through here,
      * and FindFirstFileA lists both) */
-    if (g_overlay && hle_overlay_of(out, ov, sizeof ov) == 1 && stat(ov, &st) == 0 && !S_ISDIR(st.st_mode)) {
-        snprintf(out, n, "%s", ov);
-        return 1;
-    }
+    for (int k = 0; k < g_nlayers; k++)
+        if (layer_path(k, out, ov, sizeof ov) == 1 && stat(ov, &st) == 0 && !S_ISDIR(st.st_mode)) {
+            snprintf(out, n, "%s", ov);
+            return 1;
+        }
     return exists;
 }
 
