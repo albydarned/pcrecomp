@@ -140,8 +140,24 @@ static void g_CreateFontIndirectA(void) {                /* LOGFONTA: height, wi
 
 /* ---- objects ---- */
 int hle_gdi_dib_delete(uint32_t h);                      /* gdi32.c */
+/* Solid brushes: a handle 0x0DB10000 + i (SelectObject knows the 0x0DB1
+ * range) and its COLORREF. The game makes one for its window's background
+ * (sub_0060D540, in the window procedure on a windowed run) and keeps the
+ * handle; nothing here paints with it. */
+#define MAX_BRUSHES 64
+static uint32_t g_brush[MAX_BRUSHES];
+static void g_CreateSolidBrush(void) {
+    uint32_t c = A32(0) | 0x80000000u;              /* the high bit marks the slot as used */
+    for (uint32_t i = 1; i < MAX_BRUSHES; i++)
+        if (!g_brush[i]) { g_brush[i] = c; RET(0x0DB10000u + i, 1); }
+    RET(0x0DB10001u, 1);
+}
 static void g_DeleteObject(void) {
     uint32_t h = A32(0);
+    if ((h >> 16) == 0x0DB1u) {
+        if ((h & 0xFFFF) < MAX_BRUSHES) g_brush[h & 0xFFFF] = 0;
+        RET(1, 1);
+    }
     if (h >= FONT_BASE && h - FONT_BASE < MAX_FONTS && g_font[h - FONT_BASE].used) {
         font_t *f = &g_font[h - FONT_BASE];
         if (f->ttf) TTF_CloseFont(f->ttf);
@@ -304,6 +320,7 @@ static void g_TextOutA(void) {                           /* (hdc, x, y, text, n)
 const win32hle_shim win32hle_gdidc[] = {
     { "CreateFontA", g_CreateFontA }, { "CreateFontIndirectA", g_CreateFontIndirectA },
     { "DeleteObject", g_DeleteObject }, { "GetStockObject", g_GetStockObject }, { "SelectObject", g_SelectObject },
+    { "CreateSolidBrush", g_CreateSolidBrush },
     { "GetDC", g_GetDC }, { "ReleaseDC", g_ReleaseDC }, { "SaveDC", g_SaveDC }, { "RestoreDC", g_RestoreDC },
     { "SetTextColor", g_SetTextColor }, { "SetBkColor", g_SetBkColor }, { "SetBkMode", g_SetBkMode },
     { "SetTextAlign", g_SetTextAlign }, { "GetTextColor", g_GetTextColor }, { "GetBkColor", g_GetBkColor },
