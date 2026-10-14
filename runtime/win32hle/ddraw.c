@@ -342,7 +342,15 @@ static void get_rect(uint32_t r, const surf_t *s, int *l, int *t, int *rr, int *
     if (r) *l = (int)MEM32(r), *t = (int)MEM32(r + 4), *rr = (int)MEM32(r + 8), *b = (int)MEM32(r + 12);
     else *l = 0, *t = 0, *rr = s->w, *b = s->h;
 }
-static void mark(surf_t *d) { if (d == g_primary) g_frame_seq++; }
+/* On Windows the primary is the screen: what the game puts there shows at
+ * once, pumping messages or not. A presenter that wants the same hears of
+ * each change here (screen.c). */
+void (*hle_dd_primary_hook)(void);
+static void mark(surf_t *d) {
+    if (d != g_primary) return;
+    g_frame_seq++;
+    if (hle_dd_primary_hook) hle_dd_primary_hook();
+}
 
 /* The copy: same format at both ends (DirectDraw does not convert either),
  * clipped to both surfaces, stretched nearest-neighbour when the sizes
@@ -571,6 +579,7 @@ static void pl_SetEntries(void) {
     if (start + n > 256) RET(DDERR_INVALIDPARAMS, 5);
     memcpy(p->entries + start, APTR(4), n * 4);
     g_frame_seq++;
+    if (hle_dd_primary_hook) hle_dd_primary_hook();
     RET(DD_OK, 5);
 }
 static void pl_Initialize(void) { RET(DD_OK, 4); }

@@ -260,6 +260,7 @@ extern const win32hle_shim win32hle_ddraw[];          /* DirectDraw in software 
  * when its pixels or palette may have. */
 int  hle_dd_frame(const uint8_t **px, int *w, int *h, int *pitch, int *bpp, const uint32_t **palette, unsigned *seq);
 void hle_dd_mode(int *w, int *h, int *bpp);
+extern void (*hle_dd_primary_hook)(void);            /* the primary's pixels or palette changed (a blit, an Unlock, a Flip) */
 int  hle_dd_surface_pixels(uint32_t obj, uint8_t **px, int *w, int *h, int *pitch, int *bpp);   /* 0: not a surface */
 void hle_dsound_set_master(float gain);              /* 0 mutes */
 /* A host's own sound (a movie's), mixed with the game's buffers: interleaved
