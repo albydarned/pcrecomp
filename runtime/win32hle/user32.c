@@ -435,10 +435,21 @@ static void measure(win_t *x) {
     if (combo && (x->style & 3u) != 1u) x->h = x->sel_h + 4;   /* not CBS_SIMPLE */
 }
 
+/* A visible child going (hidden or destroyed) uncovers its parent, which
+ * Windows then repaints there. Without it a game that paints its dialogs
+ * itself leaves the child's last picture on screen (Red Alert 2's combo
+ * lists, closed, stayed drawn). */
+static void invalidate_rect(win_t *x, int l, int t, int r, int b);
+static void uncover(win_t *x) {
+    win_t *p = x && x->parent && (x->style & WS_VISIBLE) ? W(x->parent) : NULL;
+    if (p) invalidate_rect(p, x->x, x->y, x->x + x->w, x->y + x->h);   /* and the siblings it covered */
+}
+
 static void destroy(uint32_t h) {
     win_t *x = W(h);
     if (!x || x->destroying) return;
     x->destroying = 1;
+    uncover(x);
     for (int i = 0; i < MAX_WIN; i++)                    /* owned windows and children first */
         if (g_win[i].used && (g_win[i].parent == h || g_win[i].owner == h)) destroy(g_win[i].hwnd);
     hle_send(h, WM_DESTROY, 0, 0);
@@ -1477,6 +1488,7 @@ static void u_ShowWindow(void) {
     win_t *x = W(A32(0));
     if (!x) RET(0, 2);
     int was = (x->style & WS_VISIBLE) != 0, show = A32(1) != 0;   /* SW_HIDE is 0 */
+    if (was && !show) uncover(x);
     if (show) x->style |= WS_VISIBLE; else x->style &= ~WS_VISIBLE;
     if (show != was) {
         hle_send(x->hwnd, WM_SHOWWINDOW, (uint32_t)show, 0);
@@ -1640,7 +1652,15 @@ static void u_MapWindowPoints(void) {                    /* (from, to, pts, n) *
 }
 static void move(win_t *x, int px, int py, int pw, int ph, int do_move, int do_size) {
     uint32_t h = x->hwnd;
-    if (do_size && x->kind == K_COMBOBOX && (x->style & 3u) != 1u) x->drop_h = ph, ph = x->h;   /* sets the dropped height */
+    /* A drop-down combo's height, given, is its height dropped; its own stays
+     * its field's. As Windows does, only a height past the field's sets it:
+     * one no taller than the field is a move of the control alone (Red Alert
+     * 2's skirmish rows are laid out at their field height, and a dropped
+     * height of 21 left their lists no room for one item). */
+    if (do_size && x->kind == K_COMBOBOX && (x->style & 3u) != 1u) {
+        if (ph > x->h) x->drop_h = ph;
+        ph = x->h;
+    }
     if (do_move) x->x = px, x->y = py;
     if (do_size) x->w = pw, x->h = ph;
     invalidate(x, 1);

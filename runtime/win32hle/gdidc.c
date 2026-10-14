@@ -88,6 +88,11 @@ static const char *font_file(const char *face, int bold, int italic) {
         snprintf(path, sizeof path, "%s%s", dirs[i], file);
         if (access(path, R_OK) == 0) return path;
     }
+    /* macOS has the faces Liberation stands in for (sp00nznet/pcrecomp#100) */
+    const char *mac = strstr(family, "Serif") ? "Times New Roman" : strstr(family, "Mono") ? "Courier New" : "Arial";
+    snprintf(path, sizeof path, "/System/Library/Fonts/Supplemental/%s%s.ttf", mac,
+             bold && italic ? " Bold Italic" : bold ? " Bold" : italic ? " Italic" : "");
+    if (access(path, R_OK) == 0) return path;
     for (size_t i = 0; i < sizeof dirs / sizeof *dirs; i++) {
         snprintf(path, sizeof path, "%s%s", dirs[i], bold ? "DejaVuSans-Bold.ttf" : "DejaVuSans.ttf");
         if (access(path, R_OK) == 0) return path;

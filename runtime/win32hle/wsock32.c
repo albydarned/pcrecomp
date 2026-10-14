@@ -29,6 +29,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <strings.h>
 #include "win32hle.h"
 
 #define SOCK_BASE 0x1000u
@@ -118,6 +121,9 @@ static void w_socket(void) {                             /* (af, type, protocol)
     }
     int fd = ipx ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : socket(AF_INET, type == 2 ? SOCK_DGRAM : SOCK_STREAM, proto);
     if (fd < 0 || fd >= 0x10000) { if (fd >= 0) close(fd); g_wsa_error = wsa_errno(errno); RET(INVALID_SOCKET, 3); }
+#ifdef SO_NOSIGPIPE                                     /* macOS: a closed peer is an error, not a SIGPIPE */
+    { int one = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
     if (ipx) g_ipx[fd >> 3] |= (uint8_t)(1 << (fd & 7));
     else g_ipx[fd >> 3] &= (uint8_t)~(1 << (fd & 7));
     RET(SOCK_BASE + (uint32_t)fd, 3);
@@ -269,16 +275,38 @@ static void w_gethostbyname(void) {
     static __thread uint32_t hv;
     enum { HE = 16, LP = HE, ADDR_ = LP + 36, NONE = ADDR_ + 32, NM = NONE + 4, ALL = NM + 256 };
     if (!hv) hv = hle_guest_alloc(ALL);
-    struct hostent *h = ASTR(0) ? gethostbyname(ASTR(0)) : NULL;
-    if (!h || h->h_addrtype != AF_INET) { g_wsa_error = WSAHOST_NOT_FOUND; RET(0, 1); }
+    const char *name = ASTR(0);
+    struct hostent *h = name ? gethostbyname(name) : NULL;
+    uint32_t addr[8];
+    int n = 0;
+    char self[256];
+    if (h && h->h_addrtype == AF_INET) {
+        snprintf(self, sizeof self, "%s", h->h_name);
+        for (; n < 8 && h->h_addr_list[n]; n++) memcpy(&addr[n], h->h_addr_list[n], 4);
+    } else {
+        /* Windows always resolves its own name; a Mac's (a .local name) may
+         * not be in the resolver gethostbyname uses, and a game that looks
+         * itself up goes on as if it had an address (Yuri's Revenge's WOnline
+         * screen does). Its own name is its interfaces' IPv4 addresses, or
+         * loopback. (sp00nznet/pcrecomp#100) */
+        if (!name || gethostname(self, sizeof self) != 0 || strcasecmp(name, self)) { g_wsa_error = WSAHOST_NOT_FOUND; RET(0, 1); }
+        struct ifaddrs *ifs = NULL;
+        if (getifaddrs(&ifs) == 0) {
+            for (struct ifaddrs *i = ifs; i && n < 8; i = i->ifa_next)
+                if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && !(i->ifa_flags & IFF_LOOPBACK) && (i->ifa_flags & IFF_UP))
+                    memcpy(&addr[n++], &((struct sockaddr_in *)i->ifa_addr)->sin_addr, 4);
+            freeifaddrs(ifs);
+        }
+        if (!n) addr[n++] = htonl(INADDR_LOOPBACK);
+    }
     memset(G2H(hv), 0, ALL);
-    snprintf((char *)G2H(hv + NM), 256, "%s", h->h_name);
+    snprintf((char *)G2H(hv + NM), 256, "%s", self);
     MEM32(hv) = hv + NM;                                 /* h_name */
     MEM32(hv + 4) = hv + NONE;                           /* h_aliases: an empty list */
     MEM16(hv + 8) = 2, MEM16(hv + 10) = 4;               /* AF_INET, 4 bytes */
     MEM32(hv + 12) = hv + LP;                            /* h_addr_list */
-    for (int i = 0; i < 8 && h->h_addr_list[i]; i++) {
-        memcpy(G2H(hv + ADDR_ + 4u * (uint32_t)i), h->h_addr_list[i], 4);
+    for (int i = 0; i < n; i++) {
+        MEM32(hv + ADDR_ + 4u * (uint32_t)i) = addr[i];
         MEM32(hv + LP + 4u * (uint32_t)i) = hv + ADDR_ + 4u * (uint32_t)i;
     }
     RET(hv, 1);
@@ -315,13 +343,14 @@ void hle_ws_poll(void) {
 /* EnumProtocolsA(protocols, buffer, &length): what IPXEmu answers, the IPX
  * entry (when IPX is asked for, or everything is), as a PROTOCOL_INFOA. */
 static void w_EnumProtocolsA(void) {
-    static char ipx_name[] = "IPX";
+    static uint32_t ipx_name;                            /* the guest keeps it: one copy for the run */
+    if (!ipx_name) ipx_name = hle_guest_strdup("IPX");
     uint32_t list = A32(0), buf = A32(1), lenp = A32(2), want = !list;
     for (uint32_t p = list; p && MEM32(p); p += 4) if (MEM32(p) == NSPROTO_IPX) want = 1;
     if (!want) RET(0, 3);
     if (!lenp || MEM32(lenp) < 32) { if (lenp) MEM32(lenp) = 32; g_wsa_error = 10055u /* WSAENOBUFS */; RET(SOCKET_ERROR, 3); }
     MEM32(buf) = 0x609, MEM32(buf + 4) = AF_IPX_WIN, MEM32(buf + 8) = 16, MEM32(buf + 12) = 14;
-    MEM32(buf + 16) = 2, MEM32(buf + 20) = NSPROTO_IPX, MEM32(buf + 24) = 576, MEM32(buf + 28) = hle_guest_strdup(ipx_name);
+    MEM32(buf + 16) = 2, MEM32(buf + 20) = NSPROTO_IPX, MEM32(buf + 24) = 576, MEM32(buf + 28) = ipx_name;
     RET(1, 3);
 }
 
