@@ -68,6 +68,12 @@ void (*hle_screen_frame_hook)(const uint8_t *px, int w, int h, int pitch, int bp
 int (*hle_screen_compose_hook)(const uint8_t *px16, int pitch, int w, int h, uint32_t *out);
 static uint32_t *g_hd;
 static size_t g_hd_n;
+/* A host's zoom: the frame's rect src (game pixels) shown scaled into its rect
+ * dst, over the rest of the picture, and the mouse in dst mapped back into
+ * src. Rects are x, y, w, h; returns 0 when nothing is zoomed. The wheel goes
+ * to the host with the frame point under the cursor (before that mapping). */
+int (*hle_screen_view_hook)(int src[4], int dst[4]);
+void (*hle_screen_wheel_hook)(float dy, int fx, int fy);
 
 static int vk_of(SDL_Scancode s) {
     if (s >= SDL_SCANCODE_A && s <= SDL_SCANCODE_Z) return 'A' + (s - SDL_SCANCODE_A);
@@ -139,8 +145,9 @@ static uint32_t scan_of(SDL_Scancode s) {
     return (unsigned)s < SDL_NUM_SCANCODES ? t[s] : 0;
 }
 
-/* window points -> game pixels, clamped to the picture */
-static void to_game(int x, int y, int *gx, int *gy) {
+/* window points -> game pixels, clamped to the picture; view: through the
+ * host's zoom (a point in its dst lands in its src) */
+static void to_frame(int x, int y, int *gx, int *gy, int view) {
     int w, h, bpp, pw, ph, ww, wh;
     hle_dd_mode(&w, &h, &bpp);
     if (g_ren && g_win) {                                /* HiDPI: the renderer counts pixels, events points */
@@ -149,13 +156,20 @@ static void to_game(int x, int y, int *gx, int *gy) {
         if (ww > 0 && wh > 0) x = x * pw / ww, y = y * ph / wh;
     }
     if (g_dst.w <= 0 || g_dst.h <= 0) { *gx = x, *gy = y; return; }
-    *gx = (int)((long long)(x - g_dst.x) * w / g_dst.w);
-    *gy = (int)((long long)(y - g_dst.y) * h / g_dst.h);
+    double fx = (double)(x - g_dst.x) * w / g_dst.w, fy = (double)(y - g_dst.y) * h / g_dst.h;
+    int src[4], dst[4];
+    if (view && hle_screen_view_hook && hle_screen_view_hook(src, dst) && dst[2] > 0 && dst[3] > 0
+        && fx >= dst[0] && fx < dst[0] + dst[2] && fy >= dst[1] && fy < dst[1] + dst[3]) {
+        fx = src[0] + (fx - dst[0]) * src[2] / dst[2];
+        fy = src[1] + (fy - dst[1]) * src[3] / dst[3];
+    }
+    *gx = (int)fx, *gy = (int)fy;
     if (*gx < 0) *gx = 0;
     if (*gy < 0) *gy = 0;
     if (*gx >= w) *gx = w - 1;
     if (*gy >= h) *gy = h - 1;
 }
+static void to_game(int x, int y, int *gx, int *gy) { to_frame(x, y, gx, gy, 1); }
 
 static void present(void) {
     const uint8_t *px;
@@ -227,6 +241,8 @@ static void present(void) {
             g_pre_w = tw * k, g_pre_h = th * k;
         }
     }
+    SDL_Texture *shown = g_tex;                          /* the picture's texture, frame-sized times sw x sh */
+    int sw = tw, sh = th;
     if (sharp && k >= 1 && g_pre && (tw * k != g_dst.w || th * k != g_dst.h)) {
         SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeNearest);
         SDL_SetRenderTarget(g_ren, g_pre);
@@ -234,9 +250,19 @@ static void present(void) {
         SDL_SetRenderTarget(g_ren, NULL);
         SDL_SetTextureScaleMode(g_pre, SDL_ScaleModeLinear);
         SDL_RenderCopy(g_ren, g_pre, NULL, &g_dst);
+        shown = g_pre, sw = g_pre_w, sh = g_pre_h;
     } else {
         SDL_SetTextureScaleMode(g_tex, g_mode == 1 ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
         SDL_RenderCopy(g_ren, g_tex, NULL, &g_dst);
+    }
+    int vsrc[4], vdst[4];
+    if (hle_screen_view_hook && hle_screen_view_hook(vsrc, vdst)) {   /* the host's zoom, over its own rect */
+        SDL_Rect from = { vsrc[0] * sw / w, vsrc[1] * sh / h, vsrc[2] * sw / w, vsrc[3] * sh / h };
+        SDL_Rect to = { g_dst.x + (int)((long long)vdst[0] * g_dst.w / w), g_dst.y + (int)((long long)vdst[1] * g_dst.h / h), 0, 0 };
+        to.w = g_dst.x + (int)((long long)(vdst[0] + vdst[2]) * g_dst.w / w) - to.x;
+        to.h = g_dst.y + (int)((long long)(vdst[1] + vdst[3]) * g_dst.h / h) - to.y;
+        if (g_mode != 3 && g_mode != 4) SDL_SetTextureScaleMode(shown, SDL_ScaleModeLinear);
+        SDL_RenderCopy(g_ren, shown, &from, &to);
     }
     if (g_mode == 2 && g_dst.h >= 2 * h) {                /* crt: the lower third of every game row darker */
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
@@ -247,6 +273,18 @@ static void present(void) {
             SDL_RenderFillRect(g_ren, &r);
         }
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+    }
+    static const char *shots = (const char *)-1;         /* HLE_SCREEN_SHOT=DIR: every 100th picture shown, as the window has it */
+    static unsigned shot_n;
+    if (shots == (const char *)-1) shots = getenv("HLE_SCREEN_SHOT");
+    if (shots && shot_n++ % 100 == 0) {
+        SDL_Surface *sf = SDL_CreateRGBSurfaceWithFormat(0, ww, wh, 32, SDL_PIXELFORMAT_ARGB8888);
+        if (sf && SDL_RenderReadPixels(g_ren, NULL, SDL_PIXELFORMAT_ARGB8888, sf->pixels, sf->pitch) == 0) {
+            char path[1024];
+            snprintf(path, sizeof path, "%s/screen_%05u.bmp", shots, shot_n / 100);
+            SDL_SaveBMP(sf, path);
+        }
+        if (sf) SDL_FreeSurface(sf);
     }
     SDL_RenderPresent(g_ren);
 }
@@ -406,6 +444,20 @@ void hle_screen_pump(void) {
             hle_input_mouse(m, gx, gy);
             break;
         }
+        case SDL_MOUSEWHEEL: {
+            if (!hle_screen_wheel_hook) break;
+            int mx, my, fx, fy;
+            SDL_GetMouseState(&mx, &my);
+            to_frame(mx, my, &fx, &fy, 0);
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            float dy = e.wheel.preciseY;
+#else
+            float dy = (float)e.wheel.y;
+#endif
+            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) dy = -dy;
+            if (dy != 0) hle_screen_wheel_hook(dy, fx, fy);
+            break;
+        }
         case SDL_WINDOWEVENT:
             if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_EXPOSED) g_shown_seq = ~0u;
             break;
@@ -420,6 +472,12 @@ static void warp(int x, int y) {
     int w, h, bpp;
     hle_dd_mode(&w, &h, &bpp);
     if (!g_win || g_dst.w <= 0 || w <= 0 || h <= 0) return;
+    int src[4], dst[4];
+    if (hle_screen_view_hook && hle_screen_view_hook(src, dst) && src[2] > 0 && src[3] > 0
+        && x >= src[0] && x < src[0] + src[2] && y >= src[1] && y < src[1] + src[3]) {
+        x = dst[0] + (x - src[0]) * dst[2] / src[2];
+        y = dst[1] + (y - src[1]) * dst[3] / src[3];
+    }
     SDL_WarpMouseInWindow(g_win, g_dst.x + x * g_dst.w / w, g_dst.y + y * g_dst.h / h);
 }
 
