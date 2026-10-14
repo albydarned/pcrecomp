@@ -6,11 +6,96 @@ versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- lift16: `Lifter.push_calls`, calls made by hand: `push cs / push label /
+  [push 0] / jmp far seg:routine` (the routine's near ret pops the 0 into a
+  lone `retf` at seg:0000), the near `push label / jmp`, and the `retf` form
+  for a pushed target. The driver names each jump; lift16 lifts it as a C call
+  that pops what the trampoline would, then continues at the label. Found on
+  Microsoft Space Simulator, 481 call sites. Opt-in. (#85)
+- drm: `unexepack.py`, Microsoft EXEPACK (LINK /EXEPACK) undone statically:
+  both header layouts, the backwards fill/copy stream, and the relocation
+  table after the unpacker's message. `test_unexepack.py` packs its own
+  files. Found on Microsoft Space Simulator's 19 install-time data
+  generators. (#86)
+- decode16/lift16: `bsf` and `bsr` (they decoded as `db 0xF`, stopping the
+  walk). difftest16 compares only ZF and the destination after them, as the
+  manual defines. 42 pairs agree with Unicorn on Microsoft Space Simulator.
+  (#87)
+- lift16: `Lifter.unwind_sp`, return from every lifted function whose frame
+  the guest unwound past (`mov sp, [saved] / ret` from deep inside), checked
+  after each call. Microsoft Space Simulator's SMDL interpreter aborts this
+  way. Opt-in. (#90)
+- iso_peek: reads a disc's Joliet tree when it has one, so files come out
+  under their real names (long, mixed case) rather than the 8.3 ISO9660 ones,
+  and names 8.3 cannot spell are found at all. Discs without Joliet read as
+  before. (#92)
 - dos32: builds and runs on Linux with gcc or clang, from the same source. The
   Win32 it used (the 4 GB reservation, locks, the clock, the fault handler, the
   CRT's file calls) has POSIX stand-ins, and guest paths match names on disk
   whatever their case. Theme Park's guest memory after a 58-second scripted
   run is identical on both systems (docs/DOS32.md). (#84)
+- disasm32: every slot of an incremental-link thunk table is a function. Runs
+  of 16+ back-to-back `jmp rel32` slots into the code are found up front; each
+  slot is a seed and an entry off the slot grid is dropped. A thunk reached
+  only through a runtime pointer was otherwise hidden by a decode straddling
+  it (Monster Truck Madness 2: 4,623 slots, 914 missing). (#81)
+- win32hle user32: a menu model and MDI, driven by SimCity 2000's MFC MDI
+  frame. Menus (`CreateMenu`/`CreatePopupMenu`/`AppendMenuA`/`InsertMenuA`/
+  `ModifyMenuA`/`DeleteMenu`/`GetMenuItemCount`/`GetSubMenu`/`CheckMenuItem`/
+  `EnableMenuItem`/`GetMenuState`/`CheckMenuRadioItem`/…) over a real item tree,
+  and `LoadMenuA` parses the classic MENU resource (UTF-16 item text) into it —
+  not drawn yet, but a program queries and edits them constantly. The MDI client
+  (a built-in `mdiclient` class whose `WM_MDICREATE` opens a child view) and the
+  frame/child default procs `DefFrameProcA`/`DefMDIChildProcA`. `DeferWindowPos`
+  (`Begin`/`Defer`/`End`, applied at once) for a frame's bar/client layout, and
+  `EqualRect`. With these SimCity 2000 runs its whole MFC startup on Linux — its
+  MDI main frame, the document child view, and the window layout — into building
+  its toolbar (next: COMCTL32 `ImageList_*`, then the 8-bit DIB blit + a window
+  surface for visible pixels).
+
+### Added
+- win32hle gdidc: the GDI palette cluster — `CreatePalette`/`GetPaletteEntries`/
+  `SetPaletteEntries`/`AnimatePalette`/`GetNearestPaletteIndex`/`SelectPalette`/
+  `RealizePalette`/`ResizePalette`/`GetSystemPaletteEntries`/`SetSystemPaletteUse`
+  (a palette is up to 256 COLORREFs; a DC carries a selected palette, so an 8bpp
+  DIB can blit through it). user32: the MDI default procs `DefFrameProcA` /
+  `DefMDIChildProcA`. With these SimCity 2000 runs its whole MFC startup on
+  Linux — registration, the palette setup, its MDI main frame — into building
+  its menu bar.
+
+### Added
+- win32hle: more of the MFC/GDI surface, driven by SimCity 2000 on Linux
+  (its CRT, MFC startup, registration check, 256-colour video warning, and data
+  loading now run). user32: the WH_CBT hook (`SetWindowsHookExA`/`CallNextHookEx`/
+  `UnhookWindowsHookEx`), fired with `HCBT_CREATEWND` before `WM_NCCREATE`, so
+  MFC subclasses each window as it is created — how `CWnd` attaches to an `HWND`;
+  plus `RegisterWindowMessageA` and `SetMessageQueue`. module: an EXE's own
+  resources are now found — the main image is registered before it is mapped, so
+  its resource directory (`DataDirectory[2]`) is read lazily on first lookup;
+  without this MFC's strings/dialogs were empty and it aborted. kernel32:
+  `GetFullPathNameA` (lexical) and the Win16 `_lopen`/`_lcreat`/`_lread`/
+  `_lwrite`/`_lclose`/`_llseek` file family on the host descriptor table.
+  advapi32: `HLE_REGTRACE` logs registry access during bring-up.
+
+### Added
+- win32hle gdidc: a GDI object model and drawing, for the MFC/GDI titles the
+  DirectDraw path never exercised. Brushes (`CreateSolidBrush`/`CreateHatchBrush`/
+  `CreateBrushIndirect`), pens (`CreatePen`/`CreatePenIndirect`), bitmaps
+  (`CreateCompatibleBitmap`/`CreateBitmap`, selectable into a memory DC), and the
+  stock objects (`GetStockObject` now returns real brush/pen objects); plus
+  `FillRect`/`FrameRect`/`Rectangle`/`PatBlt`/`SetPixel`/`GetPixel`/`MoveToEx`/
+  `LineTo` and DC→DC `BitBlt`/`StretchBlt` (like-for-like bpp — a game's own
+  back-buffer-to-window blit). `CreateCompatibleDC`/`DeleteDC` now return real
+  DCs (moved from gdi32.c) so a bitmap selected into a memory DC can be blitted.
+  Surfaced bringing SimCity 2000 up on Linux: it runs its CRT, MFC `AfxWinInit`,
+  window-class registration and GDI object setup, into MFC window creation.
+- win32hle user32: `RegisterWindowMessageA` (name→id interning, 0xC000..; MFC
+  leans on it) and `SetMessageQueue` (obsolete since Win32 → succeeds).
+- win32hle kernel32: global atoms (`GlobalAddAtomA`/`GlobalFindAtomA`/
+  `GlobalDeleteAtom`/`GlobalGetAtomNameA`) — MFC registers its window classes by
+  atom at startup; general to any MFC title.
+
+### Added
 - dos32: save states. `dos32_state_save` / `dos32_state_load` write the whole
   machine to a file and back: registers, the host's tables, the chips, and
   memory with all-zero pages left out (about 8 MB for Theme Park). A state
@@ -156,6 +241,19 @@ versions follow [SemVer](https://semver.org/).
   runtime gap). `HLE_FILETRACE=1` logs the data files a title opens. (#45)
 
 ### Fixed
+- lift16: `rcl`/`rcr` on a dword built the 33-bit value in 32 bits and lost
+  the carry; `rcr eax, 1` was garbage. Microsoft Space Simulator's Kepler
+  solver never converged. difftest16 no longer compares OF after
+  `shld`/`shrd` with a count other than 1. (#88)
+- lift16: a divide faults on quotient overflow too, not only on a zero
+  divisor (and INT64_MIN / -1 no longer kills the host), and `cpu->cs:ip`
+  is set to the divide before `DIV0_FN`, so a runtime can give a game's
+  INT 0 handler the frame it reads. `test_lift16_div.py`. (#91)
+- lift32: `loope`/`loopne` test ZF, not CF. A `loopne` after anything that
+  left the carry set ended early (Streets of SimCity's texture spans). (#93)
+- lift16: `bt`/`bts`/`btr`/`btc` with a register offset into memory address
+  a bit string (the offset is signed and not reduced to the operand width);
+  the word at the operand was tested instead. (#89)
 - lift32: `repz ret` (F3 C3) lifts as a `ret`, and generate.py's extent walk
   ends a body at it. It was UNIMPLEMENTED, so MSVC 2005's
   `__security_check_cookie` fell through into `__report_gsfailure` and every

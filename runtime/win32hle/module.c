@@ -203,7 +203,21 @@ static uint32_t dir_lookup(uint32_t root, uint32_t dir, uint32_t want, int any) 
     }
     return 0xFFFFFFFFu;
 }
+/* The main image is registered before it is mapped (hle_set_module_path runs
+ * first), so its resource directory is filled in lazily here, on the first
+ * lookup, from the now-mapped PE's DataDirectory[2]. Without this an EXE's own
+ * resources (MFC's strings, dialogs, menus) are invisible and MFC aborts. */
+static void ensure_rsrc(int m) {
+    if (m < 0 || g_mod[m].rsrc || !g_mod[m].base) return;
+    uint32_t base = g_mod[m].base;
+    if (MEM16(base) != 0x5A4D) return;                   /* 'MZ' */
+    uint32_t nt = base + MEM32(base + 0x3C);
+    if (MEM32(nt) != 0x00004550u || MEM16(nt + 24) != 0x10B) return;   /* 'PE\0\0', PE32 */
+    uint32_t dd = nt + 24 + 0x70;                        /* optional header + DataDirectory[2] (resource) */
+    g_mod[m].rsrc = MEM32(dd), g_mod[m].rsrc_size = MEM32(dd + 4);
+}
 static uint32_t find_resource(int m, uint32_t name, uint32_t type) {
+    ensure_rsrc(m);
     if (m < 0 || !g_mod[m].rsrc) return 0;
     uint32_t root = g_mod[m].base + g_mod[m].rsrc;
     uint32_t t = dir_lookup(root, root, type, 0);

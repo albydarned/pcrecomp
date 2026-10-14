@@ -315,6 +315,31 @@ static void item_free(win_t *x) {
     x->items = NULL, x->nitems = x->citems = 0;
 }
 
+/* ---- hooks ----
+ * MFC installs a WH_CBT hook and subclasses each window as it is created
+ * (HCBT_CREATEWND, before WM_NCCREATE); that is how CWnd attaches to an HWND.
+ * One hook per type; CallNextHookEx has nothing to chain to in this model. */
+#define HOOK_BASE 0x484B0000u                            /* 'HK' */
+static uint32_t g_hook[16];                              /* indexed by idHook + 1 (WH_MSGFILTER is -1) */
+static void u_SetWindowsHookExA(void) {                  /* (idHook, lpfn, hMod, dwThreadId) */
+    int id = (int)A32(0);
+    if (id >= -1 && id < 15) { g_hook[id + 1] = A32(1); RET(HOOK_BASE + (uint32_t)(id + 1), 4); }
+    RET(0, 4);
+}
+static void u_UnhookWindowsHookEx(void) {
+    uint32_t h = A32(0), i = h - HOOK_BASE;
+    if (h >= HOOK_BASE && i < 16) g_hook[i] = 0;
+    RET(1, 1);
+}
+static void u_CallNextHookEx(void) { RET(0, 4); }        /* no next hook: default processing */
+/* Fire WH_CBT; nonzero return prevents the action. */
+static uint32_t cbt_hook(uint32_t code, uint32_t wParam, uint32_t lParam) {
+    uint32_t fn = g_hook[5 + 1];                         /* WH_CBT = 5 */
+    if (!fn) return 0;
+    uint32_t a[3] = { code, wParam, lParam };
+    return hle_call_guest(fn, 3, a);
+}
+
 uint32_t hle_create_window(uint32_t exstyle, const char *cls, const char *title, uint32_t style, int px, int py, int pw, int ph,
                            uint32_t parent, uint32_t menu, uint32_t hinst, uint32_t param) {
     int c = find_class(cls);
@@ -346,6 +371,12 @@ uint32_t hle_create_window(uint32_t exstyle, const char *cls, const char *title,
     uint32_t cs[12] = { param, hinst, menu, parent, (uint32_t)ph, (uint32_t)pw, (uint32_t)py, (uint32_t)px, style, tv, cv, exstyle };
     memcpy(G2H(csv), cs, sizeof cs);
     uint32_t h = x->hwnd;
+    uint32_t cbtv = hle_guest_alloc(8);                   /* CBT_CREATEWND { lpcs, hwndInsertAfter }, in guest memory */
+    MEM32(cbtv) = csv, MEM32(cbtv + 4) = 0;
+    int vetoed = cbt_hook(3 /*HCBT_CREATEWND*/, h, cbtv);
+    hle_guest_free(cbtv);
+    if (vetoed) { hle_guest_free(csv); x->used = 0; return 0; }
+    if (!(x = W(h))) { hle_guest_free(csv); return 0; }  /* the hook may subclass via SetWindowLong(GWL_WNDPROC) */
     hle_send(h, WM_NCCREATE, 0, csv);
     int32_t created = (int32_t)hle_send(h, WM_CREATE, 0, csv);
     hle_guest_free(csv);
@@ -690,7 +721,32 @@ static uint32_t def_proc(uint32_t h, uint32_t m, uint32_t w, uint32_t l) {
     }
 }
 static void p_DefWindowProc(void) { RET(def_proc(A32(0), A32(1), A32(2), A32(3)), 4); }
+/* The MDI client: it hosts a frame's document windows. WM_MDICREATE makes a
+ * child from an MDICREATESTRUCT (how an MDI app opens a view); the rest is
+ * default. Enough for a CMDIFrameWnd to come up with its child view. */
+static void p_MDIClient(void) {
+    uint32_t h = A32(0), m = A32(1), w = A32(2), l = A32(3);
+    if (m == 0x0220u && l) {                             /* WM_MDICREATE: MDICREATESTRUCT* */
+        uint32_t cs = l;
+        const char *cls = (const char *)G2H(MEM32(cs)), *title = (const char *)G2H(MEM32(cs + 4));
+        uint32_t child = hle_create_window(0x40u /*WS_EX_MDICHILD*/, cls, title,
+            0x50000000u | MEM32(cs + 28) /*WS_CHILD|WS_VISIBLE|style*/,
+            (int)MEM32(cs + 12), (int)MEM32(cs + 16), (int)MEM32(cs + 20), (int)MEM32(cs + 24),
+            h, 0, MEM32(cs + 8), MEM32(cs + 32));
+        RET(child, 4);
+    }
+    if (m == 0x0229u) {                                  /* WM_MDIGETACTIVE: first child */
+        for (int i = 1; i < MAX_WIN; i++) if (g_win[i].used && g_win[i].parent == h) RET(g_win[i].hwnd, 4);
+        RET(0, 4);
+    }
+    RET(def_proc(h, m, w, l), 4);
+}
 static void u_DefWindowProcA(void) { RET(def_proc(A32(0), A32(1), A32(2), A32(3)), 4); }
+/* MDI default procs. DefFrameProc(hwndFrame, hwndMDIClient, msg, w, l); the
+ * MDI-specific routing (activating/sizing children) is the MDI client's; the
+ * frame's own default handling is DefWindowProc. DefMDIChildProc is 4-arg. */
+static void u_DefFrameProcA(void)    { RET(def_proc(A32(0), A32(2), A32(3), A32(4)), 5); }
+static void u_DefMDIChildProcA(void) { RET(def_proc(A32(0), A32(1), A32(2), A32(3)), 4); }
 
 /* ---- the standard controls ---- */
 static void owner_draw(win_t *x, uint32_t type, int item, uint32_t state, int l, int t, int r, int b) {
@@ -1122,7 +1178,7 @@ static const win32hle_shim g_builtin_procs[] = {
     { "hle.DefWindowProc", p_DefWindowProc }, { "hle.Button", p_Button }, { "hle.Static", p_Static },
     { "hle.Edit", p_Edit }, { "hle.ListBox", p_ListBox }, { "hle.ComboBox", p_ComboBox },
     { "hle.Trackbar", p_Trackbar }, { "hle.Progress", p_Progress }, { "hle.Hotkey", p_Hotkey },
-    { "hle.ListView", p_ListView }, { "hle.Dialog", p_Dialog }, { 0, 0 } };
+    { "hle.ListView", p_ListView }, { "hle.Dialog", p_Dialog }, { "hle.MDIClient", p_MDIClient }, { 0, 0 } };
 
 static void builtin_classes(void) {
     static int done;
@@ -1140,6 +1196,8 @@ static void builtin_classes(void) {
     add_class("msctls_progress32", hle_resolve("hle.Progress"), 0, 0, 0, K_PROGRESS);
     add_class("msctls_hotkey32", hle_resolve("hle.Hotkey"), 0, 0, 0, K_HOTKEY);
     add_class("SysListView32", hle_resolve("hle.ListView"), 0, 0, 0, K_LISTVIEW);
+    add_class("mdiclient", hle_resolve("hle.MDIClient"), 0, 4, 0, K_DEFAULT);
+    add_class("MDICLIENT", hle_resolve("hle.MDIClient"), 0, 4, 0, K_DEFAULT);
 }
 
 /* A template's string or ordinal (sz_Or_Ord), as a class/title pointer and
@@ -1590,6 +1648,16 @@ static void move(win_t *x, int px, int py, int pw, int ph, int do_move, int do_s
     if ((x = W(h)) && do_move) hle_send(h, WM_MOVE, 0, (uint32_t)(x->y & 0xFFFF) << 16 | (uint32_t)(x->x & 0xFFFF));
 }
 static void u_MoveWindow(void) { win_t *x = W(A32(0)); if (x) move(x, (int)A32(1), (int)A32(2), (int)A32(3), (int)A32(4), 1, 1); RET(x != NULL, 6); }
+/* DeferWindowPos: a frame lays its bars + client out in one batch. We have no
+ * reason to defer — apply each move at once and pass the (non-null) HDWP on. */
+static void u_BeginDeferWindowPos(void) { RET(1, 1); }
+static void u_DeferWindowPos(void) {                     /* (hdwp, hwnd, after, x, y, cx, cy, flags) */
+    win_t *x = W(A32(1)); uint32_t fl = A32(7);
+    if (x && !(fl & 2u && fl & 1u)) move(x, (int)A32(3), (int)A32(4), (int)A32(5), (int)A32(6), !(fl & 2u), !(fl & 1u));
+    RET(A32(0) ? A32(0) : 1u, 8);
+}
+static void u_EndDeferWindowPos(void) { RET(1, 1); }
+
 static void u_SetWindowPos(void) {                       /* (h, after, x, y, cx, cy, flags) */
     win_t *x = W(A32(0));
     uint32_t fl = A32(6);
@@ -1893,7 +1961,93 @@ static void u_LoadCursorA(void) {                        /* (hinst, name): an id
 static void u_LoadImageA(void)       { RET(0x1C000003u, 6); }
 static void u_LoadBitmapA(void)      { RET(0x1C000004u, 2); }
 static void u_LoadAcceleratorsA(void){ RET(0x1C000005u, 2); }  /* nonzero: games treat NULL as fatal */
-static void u_LoadMenuA(void)        { RET(0x1C000006u, 2); }
+/* ---- menus ----
+ * A menu is a flat list of items; a popup item carries a submenu handle. Menus
+ * are not drawn (no menu bar on the surface yet), but a game queries and edits
+ * them constantly (enable/check tool items, count, walk submenus), so the model
+ * is real. LoadMenuA parses the classic MENU resource (UTF-16 item text). */
+#define MF_GRAYED     0x0001u
+#define MF_DISABLED   0x0002u
+#define MF_CHECKED    0x0008u
+#define MF_POPUP      0x0010u
+#define MF_BYPOSITION 0x0400u
+#define MF_SEPARATOR  0x0800u
+#define MF_END        0x0080u
+typedef struct { uint32_t id, flags, sub; char text[64]; } mitem;
+typedef struct { int used, n; mitem it[128]; } menu_t;
+#define MAX_MENU 256
+static menu_t g_menu[MAX_MENU];
+#define MENU_BASE 0x4D450000u                            /* 'ME' */
+static menu_t *MENU(uint32_t h) { uint32_t i = h - MENU_BASE; return h >= MENU_BASE && i < MAX_MENU && g_menu[i].used ? &g_menu[i] : NULL; }
+static uint32_t new_menu(void) {
+    for (int i = 0; i < MAX_MENU; i++) if (!g_menu[i].used) { memset(&g_menu[i], 0, sizeof g_menu[i]); g_menu[i].used = 1; return MENU_BASE + (uint32_t)i; }
+    return 0;
+}
+static void menu_add(menu_t *m, uint32_t flags, uint32_t id_or_sub, const char *text) {
+    if (!m || m->n >= 128) return;
+    mitem *it = &m->it[m->n++];
+    it->flags = flags & ~MF_END;
+    if (flags & MF_POPUP) it->sub = id_or_sub; else it->id = id_or_sub;
+    if (text && !(flags & MF_SEPARATOR)) snprintf(it->text, sizeof it->text, "%s", text);
+}
+static mitem *menu_find(menu_t *m, uint32_t id, uint32_t flags) {
+    if (!m) return NULL;
+    if (flags & MF_BYPOSITION) return (int)id < m->n ? &m->it[id] : NULL;
+    for (int i = 0; i < m->n; i++) {
+        if (!m->it[i].sub && m->it[i].id == id) return &m->it[i];
+        if (m->it[i].sub) { mitem *r = menu_find(MENU(m->it[i].sub), id, flags); if (r) return r; }
+    }
+    return NULL;
+}
+/* parse one level of a classic MENU template (UTF-16 text), returning a menu. */
+static uint32_t parse_menu(const uint8_t **pp) {
+    uint32_t h = new_menu(); menu_t *m = MENU(h);
+    const uint8_t *p = *pp;
+    for (;;) {
+        uint16_t flags = (uint16_t)(p[0] | p[1] << 8); p += 2;
+        uint32_t id = 0;
+        if (!(flags & MF_POPUP)) { id = (uint32_t)(p[0] | p[1] << 8); p += 2; }
+        char text[64]; int t = 0;
+        while ((p[0] || p[1]) && t < 63) { text[t++] = (char)p[0]; p += 2; }
+        text[t] = 0; p += 2;                             /* skip the UTF-16 NUL */
+        if (flags & MF_POPUP) { uint32_t sub = parse_menu(&p); menu_add(m, flags, sub, text); }
+        else menu_add(m, flags, id, text);
+        if (flags & MF_END) break;
+    }
+    *pp = p;
+    return h;
+}
+
+static void u_CreateMenu(void)      { RET(new_menu(), 0); }
+static void u_CreatePopupMenu(void) { RET(new_menu(), 0); }
+static void u_DestroyMenu(void)     { menu_t *m = MENU(A32(0)); if (m) m->used = 0; RET(1, 1); }
+static void u_AppendMenuA(void)     { menu_t *m = MENU(A32(0)); menu_add(m, A32(1), A32(2), (A32(1) & MF_POPUP) ? NULL : ASTR(3)); RET(m ? 1u : 0u, 4); }
+static void u_InsertMenuA(void)     { menu_t *m = MENU(A32(0)); menu_add(m, A32(2), A32(3), (A32(2) & MF_POPUP) ? NULL : ASTR(4)); RET(m ? 1u : 0u, 5); } /* appends (position ignored) */
+static void u_ModifyMenuA(void)     { menu_t *m = MENU(A32(0)); mitem *it = menu_find(m, A32(1), A32(2)); if (it) { it->flags = A32(2) & ~(MF_BYPOSITION | MF_END); if (!(A32(2) & MF_POPUP) && ASTR(4)) snprintf(it->text, sizeof it->text, "%s", ASTR(4)); } RET(it ? 1u : 0u, 5); }
+static void u_DeleteMenu(void)      { menu_t *m = MENU(A32(0)); mitem *it = menu_find(m, A32(1), A32(2)); if (it && m) { int i = (int)(it - m->it); memmove(&m->it[i], &m->it[i + 1], (size_t)(m->n - i - 1) * sizeof *it); m->n--; } RET(it ? 1u : 0u, 3); }
+static void u_RemoveMenu(void)      { u_DeleteMenu(); }
+static void u_GetMenuItemCount(void){ menu_t *m = MENU(A32(0)); RET(m ? (uint32_t)m->n : 0xFFFFFFFFu, 1); }
+static void u_GetSubMenu(void)      { menu_t *m = MENU(A32(0)); int p = (int)A32(1); RET(m && p >= 0 && p < m->n ? m->it[p].sub : 0u, 2); }
+static void u_GetMenuItemID(void)   { menu_t *m = MENU(A32(0)); int p = (int)A32(1); RET(m && p >= 0 && p < m->n ? (m->it[p].sub ? 0xFFFFFFFFu : m->it[p].id) : 0xFFFFFFFFu, 2); }
+static void u_CheckMenuItem(void)   { mitem *it = menu_find(MENU(A32(0)), A32(1), A32(2)); uint32_t old = it ? (it->flags & MF_CHECKED) : 0xFFFFFFFFu; if (it) { if (A32(2) & MF_CHECKED) it->flags |= MF_CHECKED; else it->flags &= ~MF_CHECKED; } RET(old, 3); }
+static void u_EnableMenuItem(void)  { mitem *it = menu_find(MENU(A32(0)), A32(1), A32(2)); uint32_t old = it ? (it->flags & (MF_GRAYED | MF_DISABLED)) : 0xFFFFFFFFu; if (it) { it->flags &= ~(MF_GRAYED | MF_DISABLED); it->flags |= A32(2) & (MF_GRAYED | MF_DISABLED); } RET(old, 3); }
+static void u_GetMenuState(void)    { mitem *it = menu_find(MENU(A32(0)), A32(1), A32(2)); RET(it ? it->flags : 0xFFFFFFFFu, 3); }
+static void u_CheckMenuRadioItem(void) { menu_t *m = MENU(A32(0)); for (uint32_t id = A32(1); m && id <= A32(2); id++) { mitem *it = menu_find(m, id, A32(4)); if (it) { if (id == A32(3)) it->flags |= MF_CHECKED; else it->flags &= ~MF_CHECKED; } } RET(1, 5); }
+static void u_SetMenu(void)         { win_t *x = W(A32(0)); if (x) x->menu = A32(1); RET(1, 2); }
+static void u_DrawMenuBar(void)     { RET(1, 1); }
+static void u_HiliteMenuItem(void)  { RET(1, 4); }
+static void u_TrackPopupMenu(void)  { RET(0, 7); }       /* no selection (not drawn yet) */
+static void u_LoadMenuA(void) {                          /* (hModule, lpMenuName) */
+    uint32_t hr = hle_find_resource(A32(0), A32(1), 4 /* RT_MENU */);
+    if (!hr) RET(0, 2);
+    uint32_t data = hle_resource_data(A32(0), hr, NULL);
+    if (!data) RET(0, 2);
+    const uint8_t *p = (const uint8_t *)G2H(data);
+    uint16_t ver = (uint16_t)(p[0] | p[1] << 8);
+    if (ver != 0) RET(0, 2);                             /* MENUEX (version 1) not handled */
+    p += 4;                                              /* MENUHEADER: version, headerSize (both 0) */
+    RET(parse_menu(&p), 2);
+}
 
 /* RECTs */
 static void u_CopyRect(void)     { uint32_t d=A32(0), s=A32(1); if(d&&s){MEM32(d)=MEM32(s);MEM32(d+4)=MEM32(s+4);MEM32(d+8)=MEM32(s+8);MEM32(d+12)=MEM32(s+12);} RET(1,2); }
@@ -1906,6 +2060,7 @@ static void u_PtInRect(void) {                           /* (rect, POINT by valu
     int x = (int)A32(1), y = (int)A32(2);
     RET(r && x >= (int)MEM32(r) && x < (int)MEM32(r + 8) && y >= (int)MEM32(r + 4) && y < (int)MEM32(r + 12), 3);
 }
+static void u_EqualRect(void) { uint32_t a = A32(0), b = A32(1); RET(a && b && MEM32(a) == MEM32(b) && MEM32(a+4) == MEM32(b+4) && MEM32(a+8) == MEM32(b+8) && MEM32(a+12) == MEM32(b+12), 2); }
 static void u_IsRectEmpty(void) { uint32_t r = A32(0); RET(!r || (int)MEM32(r + 8) <= (int)MEM32(r) || (int)MEM32(r + 12) <= (int)MEM32(r + 4), 1); }
 static void u_IntersectRect(void) {                      /* (dst, a, b) */
     uint32_t d = A32(0), a = A32(1), b = A32(2);
@@ -1993,14 +2148,41 @@ uint32_t hle_first_hwnd(void) {
     return 0;
 }
 
+/* RegisterWindowMessageA: intern a message name to a unique id in the
+ * 0xC000.. range (what Windows gives these). MFC leans on it for its own
+ * internal messages; same name -> same id across the process. */
+static struct { char name[64]; } g_winmsg[256];
+static int g_winmsg_n;
+static void u_RegisterWindowMessageA(void) {
+    const char *s = ASTR(0);
+    if (!s) RET(0, 1);
+    for (int i = 0; i < g_winmsg_n; i++) if (!strcmp(g_winmsg[i].name, s)) RET(0xC000u + (uint32_t)i, 1);
+    if (g_winmsg_n < 256) { snprintf(g_winmsg[g_winmsg_n].name, 64, "%s", s); RET(0xC000u + (uint32_t)g_winmsg_n++, 1); }
+    RET(0xC000u, 1);
+}
+
+static void u_SetMessageQueue(void) { RET(1, 1); }       /* obsolete since Win32; always succeeds */
+
 const win32hle_shim win32hle_user32[] = {
+    { "RegisterWindowMessageA", u_RegisterWindowMessageA },
+    { "SetMessageQueue", u_SetMessageQueue },
+    { "SetWindowsHookExA", u_SetWindowsHookExA }, { "SetWindowsHookExW", u_SetWindowsHookExA },
+    { "UnhookWindowsHookEx", u_UnhookWindowsHookEx }, { "CallNextHookEx", u_CallNextHookEx },
     { "CopyRect", u_CopyRect }, { "SetRectEmpty", u_SetRectEmpty }, { "SetRect", u_SetRect },
     { "OffsetRect", u_OffsetRect }, { "InflateRect", u_InflateRect }, { "PtInRect", u_PtInRect },
+    { "EqualRect", u_EqualRect },
     { "IsRectEmpty", u_IsRectEmpty }, { "IntersectRect", u_IntersectRect }, { "UnionRect", u_UnionRect },
     { "AdjustWindowRect", u_AdjustWindowRect }, { "AdjustWindowRectEx", u_AdjustWindowRectEx },
     { "FindWindowA", u_FindWindowA }, { "LoadIconA", u_LoadIconA }, { "LoadCursorA", u_LoadCursorA },
     { "LoadImageA", u_LoadImageA }, { "LoadBitmapA", u_LoadBitmapA }, { "LoadAcceleratorsA", u_LoadAcceleratorsA },
     { "LoadMenuA", u_LoadMenuA }, { "TranslateAcceleratorA", u_TranslateAcceleratorA },
+    { "CreateMenu", u_CreateMenu }, { "CreatePopupMenu", u_CreatePopupMenu }, { "DestroyMenu", u_DestroyMenu },
+    { "AppendMenuA", u_AppendMenuA }, { "InsertMenuA", u_InsertMenuA }, { "ModifyMenuA", u_ModifyMenuA },
+    { "DeleteMenu", u_DeleteMenu }, { "RemoveMenu", u_RemoveMenu }, { "GetMenuItemCount", u_GetMenuItemCount },
+    { "GetSubMenu", u_GetSubMenu }, { "GetMenuItemID", u_GetMenuItemID }, { "CheckMenuItem", u_CheckMenuItem },
+    { "EnableMenuItem", u_EnableMenuItem }, { "GetMenuState", u_GetMenuState }, { "CheckMenuRadioItem", u_CheckMenuRadioItem },
+    { "SetMenu", u_SetMenu }, { "DrawMenuBar", u_DrawMenuBar }, { "HiliteMenuItem", u_HiliteMenuItem },
+    { "TrackPopupMenu", u_TrackPopupMenu },
     { "SetCursor", u_SetCursor }, { "ShowCursor", u_ShowCursor }, { "ClipCursor", u_ClipCursor },
     { "GetCursorPos", u_GetCursorPos }, { "SetCursorPos", u_SetCursorPos },
     { "GetDesktopWindow", u_GetDesktopWindow }, { "GetParent", u_GetParent }, { "GetWindow", u_GetWindow },
@@ -2012,6 +2194,8 @@ const win32hle_shim win32hle_user32[] = {
     { "BringWindowToTop", u_BringWindowToTop }, { "EnableWindow", u_EnableWindow },
     { "IsWindowEnabled", u_IsWindowEnabled }, { "IsWindowVisible", u_IsWindowVisible }, { "IsWindow", u_IsWindow },
     { "SetWindowPos", u_SetWindowPos }, { "MoveWindow", u_MoveWindow },
+    { "BeginDeferWindowPos", u_BeginDeferWindowPos }, { "DeferWindowPos", u_DeferWindowPos },
+    { "EndDeferWindowPos", u_EndDeferWindowPos },
     { "SetWindowLongA", u_SetWindowLongA }, { "GetWindowLongA", u_GetWindowLongA },
     { "GetWindowContextHelpId", u_GetWindowContextHelpId }, { "GetMenu", u_GetMenu },
     { "GetSystemMetrics", u_GetSystemMetrics }, { "GetClientRect", u_GetClientRect },
@@ -2025,6 +2209,7 @@ const win32hle_shim win32hle_user32[] = {
     { "RegisterClassA", u_RegisterClassA }, { "RegisterClassExA", u_RegisterClassExA },
     { "GetClassInfoA", u_GetClassInfoA }, { "GetClassNameA", u_GetClassNameA },
     { "CreateWindowExA", u_CreateWindowExA }, { "DefWindowProcA", u_DefWindowProcA },
+    { "DefFrameProcA", u_DefFrameProcA }, { "DefMDIChildProcA", u_DefMDIChildProcA },
     { "CallWindowProcA", u_CallWindowProcA }, { "ShowWindow", u_ShowWindow },
     { "CloseWindow", u_CloseWindow }, { "DestroyWindow", u_DestroyWindow },
     { "SetWindowTextA", u_SetWindowTextA }, { "GetWindowTextA", u_GetWindowTextA },

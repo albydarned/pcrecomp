@@ -24,6 +24,8 @@ int       g_fp_top;
 uint16_t  g_fpu_cw = 0x027F;
 uint16_t  g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
 uint64_t  g_mm[8];
+xmm_t     g_xmm[8];
+uint32_t  g_mxcsr = 0x1F80;
 uint32_t  g_fs_base, g_gs_base;
 ptrdiff_t g_mem_base = 0;
 uint32_t  g_cur_func;
@@ -38,6 +40,8 @@ typedef struct {
     int      fp_top;
     uint16_t fpu_cw;
     uint64_t mm[8];
+    xmm_t    xmm[8];
+    uint32_t mxcsr;
 } regs_t;
 
 static void regs_save(regs_t* r) {
@@ -46,6 +50,7 @@ static void regs_save(regs_t* r) {
     r->fs = g_fs_base; r->cur = g_cur_func;
     memcpy(r->st, g_st, sizeof g_st); r->fp_top = g_fp_top; r->fpu_cw = g_fpu_cw;
     memcpy(r->mm, g_mm, sizeof g_mm);
+    memcpy(r->xmm, g_xmm, sizeof g_xmm); r->mxcsr = g_mxcsr;
 }
 
 static void regs_load(const regs_t* r) {
@@ -54,6 +59,7 @@ static void regs_load(const regs_t* r) {
     g_fs_base = r->fs; g_cur_func = r->cur;
     memcpy(g_st, r->st, sizeof g_st); g_fp_top = r->fp_top; g_fpu_cw = r->fpu_cw;
     memcpy(g_mm, r->mm, sizeof g_mm);
+    memcpy(g_xmm, r->xmm, sizeof g_xmm); g_mxcsr = r->mxcsr;
 }
 
 /* ------------------------------------------------------------- machine lock */
@@ -105,6 +111,7 @@ void mach_enter(void) {
         m->r.esp = lo + GUEST_STACK - BRIDGE_SLOTS * 4 - 64;
         m->r.fs = make_tib(lo, lo + GUEST_STACK);
         m->r.fpu_cw = 0x027F;
+        m->r.mxcsr = 0x1F80;              /* exceptions masked, round to nearest */
         TlsSetValue(g_mach_tls, m);
     }
     if (m->depth++ == 0) regs_load(&m->r);
@@ -232,6 +239,66 @@ int native32_in_guest(uint32_t va) {
     for (int i = 0; i < g_mod_n; i++)
         if (va >= g_mods[i].base && va < g_mods[i].base + g_mods[i].span) return 1;
     return 0;
+}
+
+/* native32_hold_image: see the header. The child is marked by an environment
+ * variable, so it never launches again; the standard handles are passed on
+ * explicitly, so a harness reading a pipe sees the child's output. */
+#define NATIVE32_HELD_ENV "NATIVE32_HELD"
+
+int native32_hold_image(const char* path, uint32_t base) {
+    char flag[16], me[MAX_PATH];
+    if (GetEnvironmentVariableA(NATIVE32_HELD_ENV, flag, sizeof flag)) {
+        SetEnvironmentVariableA(NATIVE32_HELD_ENV, NULL);  /* not passed on to what the guest starts */
+        return 1;
+    }
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS32 nt;
+    FILE* f = fopen(path, "rb");
+    int ok = f && fread(&dos, sizeof dos, 1, f) == 1 && fseek(f, dos.e_lfanew, SEEK_SET) == 0 &&
+             fread(&nt, sizeof nt, 1, f) == 1 && nt.Signature == IMAGE_NT_SIGNATURE;
+    if (f) fclose(f);
+    if (!ok) return 0;
+    uint32_t span = nt.OptionalHeader.SizeOfImage;
+
+    STARTUPINFOA si = { sizeof si };
+    PROCESS_INFORMATION pi;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    HANDLE std[3] = { si.hStdInput, si.hStdOutput, si.hStdError };
+    for (int i = 0; i < 3; i++)
+        if (std[i] && std[i] != INVALID_HANDLE_VALUE) SetHandleInformation(std[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    GetModuleFileNameA(NULL, me, MAX_PATH);
+    SetEnvironmentVariableA(NATIVE32_HELD_ENV, "1");
+    BOOL made = CreateProcessA(me, GetCommandLineA(), NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+    SetEnvironmentVariableA(NATIVE32_HELD_ENV, NULL);
+    if (!made) {
+        fprintf(stderr, "[native32] cannot start the host again (error %lu)\n", GetLastError());
+        return 0;
+    }
+    if (!VirtualAllocEx(pi.hProcess, (void*)(uintptr_t)base, span, MEM_RESERVE, PAGE_NOACCESS)) {
+        fprintf(stderr, "[native32] 0x%08X+0x%X is taken at process start (error %lu): link the host "
+                "with a small /STACK and run the lifted code on a thread with a large one\n",
+                base, span, GetLastError());
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return 0;
+    }
+    HANDLE job = CreateJobObjectA(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim = { 0 };
+    lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job) {
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof lim);
+        AssignProcessToJobObject(job, pi.hProcess);
+    }
+    ResumeThread(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    ExitProcess(code);
 }
 
 uint32_t native32_map(const char* path, uint32_t base) {
@@ -459,6 +526,20 @@ static void shim_CreateThread(void) {
     g_esp += 4 + 6 * 4;
 }
 
+/* RaiseException(0x406D1388): MSVC's SetThreadName, which only an attached
+ * debugger is meant to see. The guest wraps it in
+ *     __try { RaiseException(0x406D1388, ...); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+ * but its __try frame is on the guest's SEH chain, which Windows never walks
+ * (eh32.c handles C++ frames only), so the exception went unhandled and ended
+ * the process with that code: Tiberium Wars, naming its first worker thread.
+ * Returning is what the empty __except does. Any other code is raised for real. */
+static void shim_RaiseException(void) {
+    uint32_t* a = (uint32_t*)(uintptr_t)(g_esp + 4);
+    if (a[0] != 0x406D1388u)
+        RaiseException(a[0], a[1], a[2], (const ULONG_PTR*)(uintptr_t)a[3]);
+    g_esp += 4 + 4 * 4;
+}
+
 /* _CxxThrowException: a guest throw is dispatched over the guest's own
  * frames (eh32.c), so the guest's catch blocks run. */
 void native32_shim_CxxThrowException(void);
@@ -473,6 +554,7 @@ X87CRT(controlfp) X87CRT(control87)
 
 static native32_shim_t g_builtin[] = {
     { "CreateThread", shim_CreateThread },
+    { "RaiseException", shim_RaiseException },
     { "_CxxThrowException", native32_shim_CxxThrowException },
     { "_ftol", native32_shim_ftol },
     { "_CIsqrt", native32_shim_CIsqrt }, { "_CIsin", native32_shim_CIsin },
@@ -519,7 +601,10 @@ int native32_bind(uint32_t base, native32_shim_t* shims, int nshims) {
          * in the dispatch table. LoadLibrary would load the original binary as
          * native code, or fail. */
         uint32_t guest = native32_module(dll);
-        HMODULE h = guest ? NULL : LoadLibraryA(dll);
+        /* Loaded at its first import the host did not shim: a DLL every one
+         * of whose imports is shimmed (a host that stubs a whole library out)
+         * is never loaded, so its DllMain never runs. */
+        HMODULE h = NULL;
         uint32_t* ilt = (uint32_t*)(b + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
         uint32_t* iat = (uint32_t*)(b + d->FirstThunk);
         for (; *ilt; ilt++, iat++) {
@@ -532,6 +617,7 @@ int native32_bind(uint32_t base, native32_shim_t* shims, int nshims) {
                     shimmed++;
                 }
             if (!va) {
+                if (!guest && !h) h = LoadLibraryA(dll);
                 va = guest ? native32_export(guest, nm)
                    : h ? (uint32_t)(uintptr_t)GetProcAddress(h, nm) : 0;
                 if (va && guest) guested++;

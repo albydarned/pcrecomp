@@ -133,6 +133,26 @@ CASES = [
          mem={SCRATCH: struct.pack('<ff', -0.5, 0.0)}, undef=('AF',)),
     Case('fpu.lt-zero-parity-pos', bytes.fromhex('d906d85e04dfe0f6c4050f9ac1'),
          mem={SCRATCH: struct.pack('<ff', 0.5, 0.0)}, undef=('AF',)),
+    # The x87 compares write C0 C2 C3, never EFLAGS, so a jcc after one still
+    # reads the integer instruction before it. MSVC schedules them that way:
+    # fld [esi]; fld [esi+4]; test ecx, ecx; fucom st(1); (fnstsw ax;)
+    # fstp st(1); sete dl; fstp st(0) (Bully's camera, 0x00509E84; the fnstsw
+    # is left out because this model has no TOP field to report). The sete
+    # read the floats instead, and Bully passed a null pointer on.
+    Case('fpu.fucom-keeps-eflags-zero', bytes.fromhex('d906d9460485c9dde1ddd90f94c2ddd8'),
+         regs={'ecx': 0}, mem={SCRATCH: struct.pack('<ff', 0.5, 1.0)}, undef=('AF',)),
+    Case('fpu.fucom-keeps-eflags-nonzero', bytes.fromhex('d906d9460485c9dde1ddd90f94c2ddd8'),
+         regs={'ecx': 3}, mem={SCRATCH: struct.pack('<ff', 1.0, 1.0)}, undef=('AF',)),
+    # ...and where the sete is a join point, so the lifter reads the flag kind
+    # at run time: the compare must not have changed that either.
+    Case('fpu.fucom-keeps-eflags-join', bytes.fromhex('d906d9460485c9dde1ddd90f94c2ddd8'),
+         regs={'ecx': 0}, mem={SCRATCH: struct.pack('<ff', 0.5, 1.0)}, undef=('AF',), joins=(11,)),
+    # fld; fld; test ecx, ecx; fcompp; sete dl
+    Case('fpu.fcompp-keeps-eflags', bytes.fromhex('d906d9460485c9ded90f94c2'),
+         regs={'ecx': 0}, mem={SCRATCH: struct.pack('<ff', 0.5, 1.0)}, undef=('AF',)),
+    # test ecx, ecx; fld [esi]; ftst; fstp st(0); sete dl
+    Case('fpu.ftst-keeps-eflags', bytes.fromhex('85c9d906d9e4ddd80f94c2'),
+         regs={'ecx': 0}, mem={SCRATCH: struct.pack('<f', 0.5)}, undef=('AF',)),
     # The same with the setp at a join point (a branch target, or any
     # instruction of a function that labels them all): the lifter forgets its
     # static flag state there and the setp reads the kind at runtime
@@ -638,6 +658,15 @@ CASES = [
                'Lifter(precise_carry=True) derives it (off by default: Fury3)'),
     Case('lock.inc', bytes.fromhex('f0ff06'),                       # lock inc dword [esi]
          mem={SCRATCH: (41).to_bytes(4, 'little')}),
+    # lock xadd [esi], ecx: the old value comes back in ecx, flags as add
+    Case('lock.xadd', bytes.fromhex('f00fc10e'), regs={'ecx': 0xFFFFFFFF},
+         mem={SCRATCH: (1).to_bytes(4, 'little')}),
+    Case('xadd.byte', bytes.fromhex('0fc0c8'), regs={'eax': 0x7F, 'ecx': 0x01}),   # xadd al, cl
+    # lock cmpxchg [esi], ecx: equal -> [esi] = ecx; not equal -> eax = [esi]
+    Case('lock.cmpxchg.equal', bytes.fromhex('f00fb10e'), regs={'eax': 5, 'ecx': 9},
+         mem={SCRATCH: (5).to_bytes(4, 'little')}),
+    Case('lock.cmpxchg.differ', bytes.fromhex('f00fb10e'), regs={'eax': 4, 'ecx': 9},
+         mem={SCRATCH: (5).to_bytes(4, 'little')}),
 ]
 
 # Every x87 register form, i = 1 and 2, from a stack of three distinct values
@@ -669,6 +698,93 @@ def _x87_forms():
 CASES += _x87_forms()
 
 
+# SSE/SSE2 (lift32_sse.py). xmm0 and xmm1 are loaded from the scratch page,
+# the instruction runs, and both are stored back at edi (plus mm0 at edi+48
+# for the MMX conversions), so the memory comparison sees every lane. The
+# data has a NaN, a negative, an equal pair and -0.0 in it, which is where
+# min/max, the compares and the conversions differ from the obvious C.
+def _sse_forms():
+    load = bytes.fromhex('0f1006' '0f104e10')                  # movups xmm0, [esi]; xmm1, [esi+16]
+    store = bytes.fromhex('0f1107' '0f114f10' '0f7f4730')       # movups [edi], xmm0/xmm1; movq [edi+48], mm0
+    ps = struct.pack('<8f', 1.5, -2.25, 3.0e10, float('nan'), 0.5, -2.25, -0.0, 7.75)
+    pd = struct.pack('<4d', 1.5, float('nan'), 0.25, -3.0)
+    ints = struct.pack('<8i', 7, -9, 2**31 - 1, -2**31, 100, -1, 0, 65536)
+    extra = struct.pack('<ffII', 2.5, -1.75, 0x3F80, 0)     # [esi+32]: a float pair, an MXCSR (round down)
+    forms = {
+        # scalar single, register and memory sources
+        'addss': 'f30f58c1', 'subss': 'f30f5cc1', 'mulss': 'f30f59c1', 'divss': 'f30f5ec1',
+        'minss': 'f30f5dc1', 'maxss': 'f30f5fc1', 'sqrtss': 'f30f51c1',
+        'mulss.mem': 'f30f594610', 'addss.mem': 'f30f584620',
+        'movss.reg': 'f30f10c1', 'movss.load': 'f30f104620', 'movss.store': 'f30f114f20',
+        # packed single
+        'addps': '0f58c1', 'subps': '0f5cc1', 'mulps': '0f59c1', 'divps': '0f5ec1',
+        'minps': '0f5dc1', 'maxps': '0f5fc1', 'sqrtps': '0f51c1',
+        'andps': '0f54c1', 'andnps': '0f55c1', 'orps': '0f56c1', 'xorps': '0f57c1',
+        'movaps': '0f28c1', 'movhlps': '0f12c1', 'movlhps': '0f16c1',
+        'movlps.load': '0f124620', 'movhps.load': '0f164620',
+        'movlps.store': '0f134f20', 'movhps.store': '0f174f20',
+        'shufps.1b': '0fc6c11b', 'shufps.4e': '0fc6c14e', 'unpcklps': '0f14c1', 'unpckhps': '0f15c1',
+        'cmpeqss': 'f30fc2c100', 'cmpltps': '0fc2c101', 'cmpleps': '0fc2c102',
+        'cmpunordps': '0fc2c103', 'cmpnltps': '0fc2c105',
+        'movmskps': '0f50c0',
+        # compares into EFLAGS, and the lahf idiom after one
+        'comiss': '0f2fc1', 'ucomiss': '0f2ec1', 'ucomiss.lahf': '0f2ec19f', 'comiss.mem': '0f2f4610',
+        # conversions
+        'cvtsi2ss': 'f30f2ac0', 'cvttss2si': 'f30f2cc1', 'cvtss2si': 'f30f2dc1',
+        'cvtss2si.down': '0fae5628' 'f30f2dc8',              # ldmxcsr [esi+40]; cvtss2si ecx, xmm0
+        'stmxcsr': '0fae5f28',
+        'cvtps2pi': '0f2dc1', 'cvttps2pi': '0f2cc1', 'cvtpi2ps': '0f6f4620' '0f2ac0',
+        'cvtss2sd': 'f30f5ac1', 'cvtdq2ps': '0f5bc1', 'cvttps2dq': 'f30f5bc1', 'cvtps2dq': '660f5bc1',
+        # SSE2 integer on xmm
+        'pxor': '660fefc1', 'psrldq': '660f73d805', 'pslldq': '660f73f803',
+        'punpcklqdq': '660f6cc1', 'punpckhqdq': '660f6dc1', 'pshufd': '660f70c11b', 'paddd': '660ffec1',
+        'movd.in': '660f6ec0', 'movd.out': '660f7ec8', 'movq.reg': 'f30f7ec1', 'movq.store': '660fd64f20',
+    }
+    out = []
+    for name, op in forms.items():
+        for tag, data in (('', ps), ('.int', ints)) if name in ('cvtdq2ps', 'paddd', 'pshufd', 'psrldq',
+                                                                  'pslldq', 'movd.in', 'cvtsi2ss') else (('', ps),):
+            out.append(Case('sse.%s%s' % (name, tag), load + bytes.fromhex(op) + store,
+                            regs={'eax': 0xFFFFFF85}, mem={SCRATCH: data + extra},
+                            undef=('AF',) if 'lahf' in name else ()))
+    # packed integer SSE2 on xmm: the lane shifts (saturating counts included),
+    # compares, word extract/insert, byte mask, and the conversion to double.
+    # Each also has an MMX form, which these must never be lifted as.
+    for name, op in {'psrlq.imm': '660f73d00c', 'psllq.imm': '660f73f034', 'psrlq.xmm': '660fd3c1',
+                     'psrlq.mem': '660fd34620', 'psrld.imm': '660f72d005', 'pslld.imm': '660f72f01f',
+                     'psrad.imm': '660f72e004', 'psrad.sat': '660f72e021', 'psraw.imm': '660f71e003',
+                     'psrlw.sat': '660f71d011', 'psllw.imm': '660f71f004',
+                     'pcmpeqb': '660f74c1', 'pcmpeqw': '660f75c1', 'pcmpeqd': '660f76c1',
+                     'pcmpgtb': '660f64c1', 'pcmpgtw': '660f65c1', 'pcmpgtd': '660f66c1',
+                     'pmaxsw': '660feec1', 'pminsw': '660feac1',
+                     'pextrw': '660fc5c003', 'pextrw.6': '660fc5c906', 'pinsrw': '660fc4c005',
+                     'pinsrw.mem': '660fc44e0802', 'pmovmskb': '660fd7c0', 'cvtdq2pd': 'f30fe6c1'}.items():
+        for tag, data in (('', ps), ('.int', ints)):
+            out.append(Case('sse.%s%s' % (name, tag), load + bytes.fromhex(op) + store,
+                            regs={'eax': 0xFFFFFF85, 'ecx': 0x12345678}, mem={SCRATCH: data + extra}))
+    # double precision on its own data
+    for name, op in {'addsd': 'f20f58c1', 'subsd': 'f20f5cc1', 'mulsd': 'f20f59c1', 'divsd': 'f20f5ec1',
+                     'minsd': 'f20f5dc1', 'maxsd': 'f20f5fc1', 'comisd': '660f2fc1', 'ucomisd': '660f2ec1',
+                     'cvtsd2ss': 'f20f5ac1', 'cvttsd2si': 'f20f2cc1', 'xorpd': '660f57c1',
+                     'movsd.reg': 'f20f10c1', 'movsd.load': 'f20f104618', 'unpcklpd': '660f14c1'}.items():
+        out.append(Case('sse.%s' % name, load + bytes.fromhex(op) + store, mem={SCRATCH: pd + extra}))
+    # fcomi: fld [esi]; fld [esi+4]; fcomi st(1) / fcomip st(1) / fucomip; fstp what is left
+    for name, op, pops in (('fcomi', 'dbf1', 0), ('fcomip', 'dff1', 1), ('fucomip', 'dfe9', 1)):
+        for tag, data in (('less', (1.0, 0.5)), ('equal', (2.0, 2.0)), ('nan', (1.0, float('nan')))):
+            out.append(Case('x87.%s.%s' % (name, tag),
+                            bytes.fromhex('d906' 'd94604' + op + 'dd1f' + ('' if pops else 'dd5f08')),
+                            mem={SCRATCH: struct.pack('<ff', *data) + bytes(24)}))
+    # bsf/bsr: the index, and ZF with the destination left alone for 0
+    for name, op in (('bsf', '0fbcc1'), ('bsr', '0fbdc1')):
+        for v in (0x00F0, 0x80000001, 0):
+            out.append(Case('%s.%x' % (name, v), bytes.fromhex(op), regs={'ecx': v, 'eax': 0x1234},
+                            undef=('CF', 'OF', 'SF', 'AF', 'PF')))
+    return out
+
+
+CASES += _sse_forms()
+
+
 # ---------------------------------------------------------------- reference
 
 def run_unicorn(case):
@@ -682,6 +798,7 @@ def run_unicorn(case):
         mu.reg_write(UC_REGS[name], val)
     mu.reg_write(X.UC_X86_REG_EFLAGS, EFLAGS_START)
     mu.reg_write(X.UC_X86_REG_FPCW, FPU_CONTROL_WORD)
+    mu.reg_write(X.UC_X86_REG_MXCSR, 0x1F80)   # what every Windows thread starts with
 
     before = bytearray(mu.mem_read(BASE, SIZE))
     mu.emu_start(BASE, BASE + len(case.code))
@@ -780,6 +897,9 @@ int      g_fp_top;
 uint16_t g_fpu_cw = 0x027F;
 uint16_t g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
 uint32_t g_fs_base, g_gs_base, g_cur_func;
+uint64_t g_mm[8];
+xmm_t    g_xmm[8];
+uint32_t g_mxcsr = 0x1F80;
 ptrdiff_t g_mem_base;
 void recomp_dump_trace(const char *why) { (void)why; }
 
@@ -835,6 +955,7 @@ def build_c(cases):
     g_esp = 0x{regs['esp']:08X}u; g_ebp = 0x{regs['ebp']:08X}u;
     g_esi = 0x{regs['esi']:08X}u; g_edi = 0x{regs['edi']:08X}u;
     memset(g_st, 0, sizeof g_st); g_fp_top = 0;
+    memset(g_mm, 0, sizeof g_mm); memset(g_xmm, 0, sizeof g_xmm); g_mxcsr = 0x1F80;
     out_eflags = 0;
     case_{i}();
     printf("CASE {i}\\n");

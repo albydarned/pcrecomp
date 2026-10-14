@@ -137,6 +137,7 @@ static void reg_save(void) {
 }
 
 static uint32_t open_key(uint32_t parent, const char *path, uint32_t out, int create) {
+    if (getenv("HLE_REGTRACE")) fprintf(stderr, "[reg] %s key \"%s\"\n", create ? "create" : "open", path ? path : "(null)");
     rkey_t *p = root_of(parent);
     if (!p) return 6u;                                   /* ERROR_INVALID_HANDLE */
     rkey_t *k = subkey(p, path, create);
@@ -158,6 +159,7 @@ static void r_RegCloseKey(void) { hle_handle_close(A32(0)); RET(ERROR_SUCCESS, 1
 static void r_RegQueryValueExA(void) {                   /* (key, name, 0, &type, data, &size) */
     rkey_t *k = root_of(A32(0));
     value_t *v = k ? find_value(k, ASTR(1), 0) : NULL;
+    if (getenv("HLE_REGTRACE")) fprintf(stderr, "[reg] query \"%s\" -> %s\n", ASTR(1) ? ASTR(1) : "(default)", v ? "found" : "MISSING");
     if (!v) RET(ERROR_FILE_NOT_FOUND, 6);
     if (A32(3)) MEM32(A32(3)) = v->type;
     uint32_t have = A32(5) ? MEM32(A32(5)) : 0;

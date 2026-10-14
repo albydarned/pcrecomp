@@ -113,6 +113,65 @@ int main(void) {
         CHECK(recomp_lookup_import(va1) == (recomp_func_t)add3);
     }
 
+    /* A DLL every one of whose imports the host shims is never loaded:
+     * version.dll's first import descriptor renamed to a DLL this process
+     * has not loaded, and all its imports shimmed. */
+    {
+        IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(uintptr_t)(base + ((IMAGE_DOS_HEADER*)(uintptr_t)base)->e_lfanew);
+        IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)(uintptr_t)(base +
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+        uint32_t* ilt = (uint32_t*)(uintptr_t)(base + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        char* name = (char*)(uintptr_t)(base + d->Name);
+        static native32_shim_t shims[256];
+        int n = 0;
+        for (; *ilt && n < 256; ilt++)
+            if (!(*ilt & 0x80000000u)) {
+                shims[n].name = (const char*)(uintptr_t)(base + *ilt + 2);
+                shims[n++].fn = (recomp_func_t)add3;
+            }
+        CHECK(GetModuleHandleA("icm32.dll") == NULL && strlen(name) >= strlen("icm32.dll"));
+        strcpy(name, "icm32.dll");
+        native32_bind(base, shims, n);
+        CHECK(GetModuleHandleA("icm32.dll") == NULL);
+    }
+
+    /* RaiseException is a built-in shim: the SetThreadName code returns, as the
+     * guest's empty __except would; any other code is raised for real. This
+     * exe (its static CRT) imports RaiseException, so bind a copy of it. */
+    {
+        char self[MAX_PATH];
+        GetModuleFileNameA(NULL, self, MAX_PATH);
+        uint32_t sb = 0x23000000u;
+        CHECK(native32_map(self, sb) != 0);
+        native32_bind(sb, NULL, 0);
+        uint32_t slot = 0;
+        IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(uintptr_t)(sb + ((IMAGE_DOS_HEADER*)(uintptr_t)sb)->e_lfanew);
+        IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)(uintptr_t)(sb +
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+        for (; d->Name && !slot; d++) {
+            uint32_t* ilt = (uint32_t*)(uintptr_t)(sb + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+            for (int k = 0; ilt[k] && !slot; k++)
+                if (!(ilt[k] & 0x80000000u) && !strcmp((const char*)(uintptr_t)(sb + ilt[k] + 2), "RaiseException"))
+                    slot = MEM32(sb + d->FirstThunk + 4 * k);
+        }
+        CHECK(slot != 0);
+        if (slot) {
+            mach_enter();
+            uint32_t esp0 = g_esp, name[4] = { 0x1000, 0, 0xFFFFFFFFu, 0 };
+            uint32_t args[4] = { 0x406D1388u, 0, 4, (uint32_t)(uintptr_t)name };
+            uint32_t after;
+            call((void*)(uintptr_t)slot, 4, args, &after);     /* returns: the name is swallowed */
+            CHECK(after == esp0);
+            int raised = 0;
+            args[0] = 0xE0001234u;
+            __try { call((void*)(uintptr_t)slot, 4, args, &after); }
+            __except (GetExceptionCode() == 0xE0001234u) { raised = 1; }
+            CHECK(raised);
+            g_esp = esp0;
+            mach_leave();
+        }
+    }
+
     printf("native32 selftest: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
 }

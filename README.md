@@ -12,7 +12,7 @@
 
 **The unified toolbox for tearing apart old PC software and putting it back together, better.**
 
-This repo collects every tool, runtime, and hard-won trick from our PC static recompilation projects into one place. Next time we want to crack open a dusty `.exe` from 1995 and make it run on Windows 11, we start here.
+This repo collects every tool, runtime, and hard-won trick from our PC static recompilation projects into one place. Next time we want to crack open a dusty `.exe` from 1995 and make it run again — on Windows 11, or **natively on Linux with no emulator and no Wine** — we start here.
 
 ---
 
@@ -49,9 +49,15 @@ pcrecomp/
                    go to real Windows with no shims (MSVC x86)
     nextstep/      a NeXTSTEP 3.x host for recomp32 code: Mach-O + shlib
                    loader, name-bound libsys shims, ObjC runtime, AppKit on SDL2
+    win32hle/      an *implemented* Win32 on libc/POSIX/SDL2 (where native32
+                   forwards to real Windows, this answers the imports itself):
+                   a PE loader, window manager, GDI, DirectDraw, DirectSound,
+                   Bink, COM and the registry, so recomp32 code runs on Linux
+                   with no Windows and no Wine (runtime/win32hle/README.md)
     recomp64_cpu/  64-bit, explicit CPU struct, plus guest C++ exception handling
     hybrid/        The lifted <-> real boundary, for keeping MFC or the CRT real
-    compat/        Win32 -> SDL2 mapping
+    compat/        Win32 -> SDL2 mapping (the original annotated import census;
+                   win32hle is the implemented successor)
   templates/       Starter CMakeLists and .gitignore for a new project
   docs/            Pipeline, philosophy, the hybrid boundary, publishing
 ```
@@ -68,7 +74,7 @@ on what the binary is:
 | Find functions | `disasm/analyze`, `disasm/largemodel16` | `ne/ne_decode` (or IDA via `ida/ida_export`) | `disasm/disasm32`, `cpp/rtti`, `cpp/vtable_scan`, `lift/recover`, `disasm/seed_from_log` | an IDA catalog, closed by `lift/generate64` |
 | Lift | `lift/lift16` | `lift/ne_lift` | `lift/lift32` (global registers) or `lift/lift32_cpu` (CPU struct) | `lift/lift64_cpu` |
 | Generate the build tree | the project's own driver | `ne/gen_segments_h`, `ne/gen_unresolved_stubs`, `ne/gen_win16_stubs`, `ne/gen_image` | `python -m tools` (`lift/translator`), `lift/generate` | `lift/generate64` |
-| Runtime | `runtime/recomp16` | `runtime/win16` | `runtime/recomp32` or `recomp32_cpu`, plus `hybrid`; host it with `native32` | `runtime/recomp64_cpu` |
+| Runtime | `runtime/recomp16` | `runtime/win16` | `runtime/recomp32` or `recomp32_cpu`, plus `hybrid`; host it with `native32` (on Windows) or `win32hle` (off Windows, e.g. Linux) | `runtime/recomp64_cpu` |
 | Test the lift | `lift/difftest16`, `recomp16/cpu_selftest.c` | `lift/difftest16 --ne` | `lift/difftest` (Unicorn), `recomp32_cpu/cpu_selftest.c` | `lift/difftest64` (the host CPU) |
 
 `disasm/score_recovery` scores any of the catalogs against a linker map, a PDB
@@ -191,6 +197,28 @@ live in `generate64.py` and `runtime/recomp64_cpu/`:
   shares the calling convention, so the loader puts the real function address
   in the IAT slot. The import map generate64 emits is for reading crash trails.
 
+### Running off Windows — natively on Linux, no Wine
+
+`native32` hosts a lifted 32-bit program by forwarding its imports to the real
+Win32 API, so it only runs on Windows. `runtime/win32hle/` **answers those
+imports itself** on libc / POSIX / SDL2 — a PE loader, a windowing/dialog/menu
+manager, GDI (with SDL2_ttf text), software DirectDraw and DirectSound, Bink
+(ffmpeg), COM, structured storage, an in-memory registry and Winsock — so the
+same lifted C runs on Linux with no emulator and no Wine. It reuses native32's
+shim ABI, so it needs no inline asm; it is the Win32 counterpart of `nextstep/`.
+
+What runs on it today (see [runtime/win32hle/README.md](runtime/win32hle/README.md)):
+
+- **Tiberian Sun / Firestorm** — boots, plays its movies and music, runs its
+  menus and a skirmish.
+- **Red Alert 2 / Yuri's Revenge** — with its Bink movies.
+- **Fury³** — its CRT and `WinMain` (the first census).
+- **SimCity 2000** — its whole MFC MDI startup, into the main window and toolbar.
+
+Build it with gcc `-m32` + 32-bit SDL2/SDL2_ttf; `runtime/win32hle/build_selftests.sh`
+builds and runs the headless selftests. Still out of scope: guest SEH / C++
+exceptions, and DirectX past DirectDraw 2 / DirectSound 1.
+
 ## The Projects That Built This
 
 Every tool here was forged in the fires of an actual recompilation project.
@@ -219,6 +247,7 @@ pipeline run.
 | **[mtm](https://github.com/sp00nznet/mtm)** | Monster Truck Madness 1 + 2 | 1996 / 1998 | Terminal Reality, voxel runtime as a standalone DLL | P0 - the Fury³ engine a third time, renderer split into named DLLs |
 | **[catz](https://github.com/sp00nznet/catz-recomp)** | Catz | 1996 | 16-bit NE engine DLL (PF Magic) | Runs! Win32 window, original frame loop, toys and saving work |
 | **[encarta](https://github.com/sp00nznet/encarta)** | Encarta 97 Encyclopedia | 1996 | MFC 4.0 + proprietary | **Runs!** Whole app lifted (7,326 fns); hybrid boundary puts the app body in recompiled code - 10,242 real MFC virtual dispatches land lifted per session |
+| **[simcity2000](https://github.com/sp00nznet/simcity2000)** | SimCity 2000 (CD / Win95 edition) | 1996 | Maxis, MFC 4.0 + static CRT (Win32) | Plays (Windows); the **win32hle Linux bring-up** runs its whole MFC startup into the main window + toolbar |
 | **[gta](https://github.com/sp00nznet/gta)** | Grand Theft Auto | 1997 | DMA "Race'n'Chase" | Builds & runs - 4,094 functions, 444K lines, runtime bringup |
 | **[pod](https://github.com/sp00nznet/pod-recomp)** | POD Gold | 1997 | Ubi Soft MMX software rasteriser | Compiles & links - 3,405 functions, 0 lift errors, 422K lines |
 | **[ejay](https://github.com/sp00nznet/ejay)** | Dance eJay 1 + 2 | 1997 | PXD Musicsoft audio engine behind a VB front end | **Plays and draws!** Decodes its intro, streams to a real sound card at 22,050 Hz and animates its cursor - out of recompiled 16-bit code |
@@ -227,11 +256,13 @@ pipeline run.
 | **[fallout2-re](https://github.com/sp00nznet/fallout2-re)** | Fallout 2 | 1998 | Custom (Interplay) | Fork - decompilation ~complete (alexbatalov upstream) |
 | **[trespasser](https://github.com/sp00nznet/trespasser)** | Jurassic Park: Trespasser | 1998 | DreamWorks Interactive rigid-body engine (MSVC 6.0) | P0 - reconnaissance. Ships a linker map, which makes it the calibration target for function recovery |
 | **[nocturne](https://github.com/sp00nznet/nocturne)** | Nocturne | 1999 | Terminal Reality, Watcom C/C++32 | Phase 7 - 6,027 functions lift with 0 errors; real window, 42 MB image mapped, IAT dispatch, 95 of 171 imports live |
+| **[tiberiansun-recomp](https://github.com/sp00nznet/tiberiansun-recomp)** | C&C: Tiberian Sun + Firestorm | 1999 | Westwood TS engine (Win32) | **Runs natively on Linux** (win32hle): boots, plays its movies and music, runs its menus, and plays a skirmish - no Wine |
 | **[mechwarrior3-recomp](https://github.com/sp00nznet/mechwarrior3-recomp)** | MechWarrior 3 | 1999 | Zipper GOS engine (VC6 + MFC42, DirectX 6) | Compiles - 2,805 functions, 0 lift errors, 158K lines, all 7 TUs build as a static lib |
 | **[recoil-recomp](https://github.com/sp00nznet/recoil-recomp)** | Recoil | 1999 | Zipper GOS engine (VC6 + MFC42) | Compiles - 3,490 functions, 0 lift errors, 321K lines, 8/8 TUs build |
 | **[xwa](https://github.com/sp00nznet/xwa)** | X-Wing Alliance | 1999 | Custom (LucasArts) | Active - D3D11 port, concourse UI runs, 2,702 functions |
 | **[sof](https://github.com/sp00nznet/sof)** | Soldier of Fortune | 2000 | Quake II + GHOUL | Active - SDL2 port, 8 subsystems, full maps render |
 | **[gunman](https://github.com/sp00nznet/gunman)** | Gunman Chronicles | 2000 | GoldSrc (Half-Life) | Phase 2 - 3,990 functions, weapons/entities rebuilt |
+| **[redalert2-recomp](https://github.com/sp00nznet/redalert2-recomp)** | C&C: Red Alert 2 + Yuri's Revenge | 2000 | Westwood (Win32) | **Runs natively on Linux** (win32hle) with its Bink movies; a D3D11 presenter (720p-4K, HD voxel units) |
 | **[heavymetal](https://github.com/sp00nznet/heavymetal)** | Heavy Metal: FAKK2 | 2000 | id Tech 3 + UberTools | Foundation - 57 source files, core systems scaffolded |
 | **[crimsonskies](https://github.com/sp00nznet/crimsonskies)** | Crimson Skies | 2000 | Zipper GOS engine | Compiles & links - 6,232 functions, 826K lines, runtime bringup |
 | **[forcecommander](https://github.com/sp00nznet/forcecommander)** | Star Wars: Force Commander | 2000 | LucasArts Ronin engine (MSVC 6) | **In game!** The campaign's briefing room renders in 3D - 39,038 functions, 10.7M lines, 0 lift errors |
@@ -549,7 +580,12 @@ python tools/ne/ne_decode.py GAME.EXE --ida-json code_map.json
 
 **For format tools:** C compiler (MSVC or GCC)
 
-**For runtime:** CMake 3.20+, Visual Studio 2022 or compatible
+**For the runtime on Windows:** CMake 3.20+, Visual Studio 2022 or compatible
+
+**For the runtime off Windows (`win32hle`, Linux):** a 32-bit toolchain and SDL2,
+built `-m32`. On Debian/Ubuntu: `dpkg --add-architecture i386; apt install
+gcc-multilib libsdl2-dev:i386 libsdl2-ttf-dev:i386` (ffmpeg dev too for Bink).
+`runtime/win32hle/build_selftests.sh` builds and runs the suite headless.
 
 ```bash
 pip install capstone pefile lief unicorn cryptography
@@ -595,7 +631,7 @@ pip install capstone pefile lief unicorn cryptography
 
 > Any PC application ever compiled can be systematically deconstructed and rebuilt for modern hardware. It's not magic, it's just work -- and with the right tools, it's *less* work every time.
 
-We've proven this across DOS, Win16, Win32, Win64, MFC, Quake-family engines, GoldSrc, id Tech 3, and completely custom engines. The pattern is always the same: **Analyze -> Disassemble -> Classify -> Lift -> Shim -> Build -> Debug -> Ship.**
+We've proven this across DOS, Win16, Win32, Win64, MFC, Quake-family engines, GoldSrc, id Tech 3, and completely custom engines — and we now run the results not just on Windows 11 but **natively on Linux, with no emulator and no Wine** (`runtime/win32hle/`). The pattern is always the same: **Analyze -> Disassemble -> Classify -> Lift -> Shim -> Build -> Debug -> Ship.**
 
 Read the full philosophy in [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md).
 

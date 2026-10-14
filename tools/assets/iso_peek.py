@@ -57,7 +57,7 @@ class Reader:
             return r.read(size)
 
 
-def _entries(block, base_off):
+def _entries(block, base_off, joliet=False):
     """Walk one directory extent. Yields (name, offset, size, is_dir)."""
     p = 0
     while p < len(block):
@@ -76,8 +76,10 @@ def _entries(block, base_off):
         size = struct.unpack_from('<I', block, p + 10)[0]
         flags = block[p + 25]
         nlen = block[p + 32]
-        name = block[p + 33:p + 33 + nlen].decode('latin1', 'replace')
-        # '\x00' and '\x01' are "." and ".."; ";1" is the ISO version suffix.
+        raw = block[p + 33:p + 33 + nlen]
+        # '\x00' and '\x01' are "." and ".." (one byte in Joliet too); ";1" is
+        # the ISO version suffix.
+        name = raw.decode('utf-16-be', 'replace') if joliet and nlen > 1 else raw.decode('latin1', 'replace')
         if name not in ('\x00', '\x01'):
             yield name.split(';')[0], lba * SECTOR, size, bool(flags & 2)
         p += length
@@ -89,15 +91,26 @@ def walk(reader, verbose=False):
     if pvd[1:6] != b'CD001':
         raise SystemExit("not an ISO9660 image (no CD001 at sector 16) -- if it "
                          "is a raw 2352-byte BIN, run tools/assets/bin2iso.js first")
-    root_off = struct.unpack_from('<I', pvd, 156 + 2)[0] * SECTOR
-    root_size = struct.unpack_from('<I', pvd, 156 + 10)[0]
+    # A Joliet supplementary descriptor (type 2, UCS-2 escape %/@ %/C %/E)
+    # carries the long, mixed-case names; the primary tree has 8.3 ones
+    # (SELECT~1.BMP for selectCar.bmp). Prefer it when the disc has one.
+    vd, joliet = pvd, False
+    for n in range(17, 32):
+        d = reader.read(n * SECTOR, SECTOR)
+        if d[1:6] != b'CD001' or d[0] == 255:
+            break
+        if d[0] == 2 and d[88:91] in (b'%/@', b'%/C', b'%/E'):
+            vd, joliet = d, True
+            break
+    root_off = struct.unpack_from('<I', vd, 156 + 2)[0] * SECTOR
+    root_size = struct.unpack_from('<I', vd, 156 + 10)[0]
 
     out = []
     pending = [('', root_off, root_size)]
     while pending:
         prefix, off, size = pending.pop(0)
         block = reader.read(off, size)
-        for name, eoff, esize, is_dir in _entries(block, off):
+        for name, eoff, esize, is_dir in _entries(block, off, joliet):
             path = prefix + '/' + name if prefix else name
             if is_dir:
                 pending.append((path, eoff, esize))

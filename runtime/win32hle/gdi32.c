@@ -121,7 +121,6 @@ const win32hle_shim win32hle_gdi32[] = {
     { "GetDeviceCaps",      g_GetDeviceCaps },
     { "CreateDIBSection",   g_CreateDIBSection },
     { "StretchDIBits",      g_StretchDIBits },
-    { "CreateCompatibleDC", g_CreateCompatibleDC },
-    { "DeleteDC",           g_DeleteDC },
+    /* CreateCompatibleDC/DeleteDC now in gdidc.c (real DCs for BitBlt) */
     { 0, 0 }
 };

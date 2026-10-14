@@ -482,7 +482,41 @@ static void k_WriteConsoleA(void) {                      /* (h, buf, n, &written
     RET(1, 5);
 }
 
+/* Atoms: MFC interns its window-class names as global atoms very early in
+ * startup. A small intern table numbered from 0xC000 (the Win32 app-atom
+ * range); global and local atoms share it, which is all a single guest sees. */
+#define ATOM_BASE 0xC000u
+static struct { char *s; } g_atoms[1024];
+static int g_atom_n;
+static uint32_t atom_intern(const char *s) {
+    if (!s) return 0;
+    for (int i = 0; i < g_atom_n; i++) if (!strcmp(g_atoms[i].s, s)) return ATOM_BASE + (uint32_t)i;
+    if (g_atom_n >= 1024) return 0;
+    g_atoms[g_atom_n].s = strdup(s);
+    return ATOM_BASE + (uint32_t)g_atom_n++;
+}
+static const char *atom_name(uint32_t a) {
+    uint32_t i = a - ATOM_BASE;
+    return (a >= ATOM_BASE && (int)i < g_atom_n) ? g_atoms[i].s : NULL;
+}
+static void k_GlobalAddAtomA(void)  { RET(atom_intern(ASTR(0)), 1); }
+static void k_GlobalFindAtomA(void) {
+    const char *s = ASTR(0);
+    if (s) for (int i = 0; i < g_atom_n; i++) if (!strcmp(g_atoms[i].s, s)) RET(ATOM_BASE + (uint32_t)i, 1);
+    RET(0, 1);
+}
+static void k_GlobalDeleteAtom(void) { RET(0, 1); }   /* kept interned; refcount ignored */
+static void k_GlobalGetAtomNameA(void) {              /* (atom, buf, size) */
+    const char *n = atom_name(A32(0)); char *buf = ASTR(1); uint32_t sz = A32(2);
+    if (buf && sz) { if (n) { strncpy(buf, n, sz - 1); buf[sz - 1] = 0; } else buf[0] = 0; }
+    RET(n && buf ? (uint32_t)strlen(buf) : 0u, 3);
+}
+
 const win32hle_shim win32hle_kernel32[] = {
+    { "GlobalAddAtomA",     k_GlobalAddAtomA },
+    { "GlobalFindAtomA",    k_GlobalFindAtomA },
+    { "GlobalDeleteAtom",   k_GlobalDeleteAtom },
+    { "GlobalGetAtomNameA", k_GlobalGetAtomNameA },
     { "GetProcessHeap",     k_GetProcessHeap },
     { "GetCommandLineA",    k_GetCommandLineA },
     { "GetCurrentProcess",  k_GetCurrentProcess },

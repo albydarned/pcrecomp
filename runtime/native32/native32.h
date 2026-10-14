@@ -40,6 +40,20 @@ typedef struct { const char* name; recomp_func_t fn; uint32_t va; } native32_shi
 /* Call once, before anything else. */
 void native32_init(void);
 
+/* Keep a guest image's range free from process start. The process's first
+ * thread stack (its /STACK reserve), heaps and the locale files are placed
+ * bottom-up before main() runs; with a 16 MB /STACK the stack alone is at
+ * 0x00400000-0x01400000, so an image based there either fails to map or is
+ * committed into the stack's own reservation. In the launching process this
+ * starts the host again suspended, reserves [base, base + the image's
+ * SizeOfImage) in it before its loader runs, resumes it and exits with its
+ * exit code; the child (in a kill-on-close job, so it dies with the launcher)
+ * gets 1 back and maps the image into the reservation. Returns 0 if the
+ * range could not be held; the caller then maps as before.
+ * The host's /STACK must be small (256 KB) so the child's first stack fits
+ * below base: run the lifted code on a thread with a large stack. */
+int native32_hold_image(const char* path, uint32_t base);
+
 /* Map a PE at its preferred base (image_loader.c) and make its executable
  * sections non-executable, so every entry comes through the dispatch table or
  * the callback trampoline. Returns the mapped span, 0 on failure. */

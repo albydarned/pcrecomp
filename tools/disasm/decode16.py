@@ -982,6 +982,10 @@ class Decoder:
                 reg, rm, _ = self._decode_modrm(True, seg_override)
                 inst.mnemonic = {0xA3:'bt',0xAB:'bts',0xB3:'btr',0xBB:'btc'}[op2b]
                 inst.op1 = rm; inst.op2 = reg
+            elif op2b in (0xBC, 0xBD):        # BSF/BSR r, r/m
+                reg, rm, _ = self._decode_modrm(True, seg_override)
+                inst.mnemonic = 'bsf' if op2b == 0xBC else 'bsr'
+                inst.op1 = reg; inst.op2 = rm
             elif op2b == 0xBA:                # BT-group r/m, imm8
                 _, rm, sub = self._decode_modrm(True, seg_override)
                 inst.mnemonic = ['?','?','?','?','bt','bts','btr','btc'][sub]

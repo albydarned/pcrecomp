@@ -275,7 +275,9 @@ class ISCabinet:
                 fd_offset = (self._ft_base + self.cab_desc.file_table_offset2
                              + i * FileDescriptor.SIZE_V6)
             fd = FileDescriptor(self.hdr_data, fd_offset, self.major_version)
-            fd.name = self._read_string(fd.name_offset)
+            # An invalid entry's fields are garbage (Messiah's v5 cab has
+            # name offsets near 4 GB); it is never extracted, so don't read them.
+            fd.name = '' if fd.is_invalid else self._read_string(fd.name_offset)
             fd.index = i
 
             # Resolve directory path

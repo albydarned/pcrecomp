@@ -618,7 +618,60 @@ static void k_WritePrivateProfileStringA(void) {         /* (sec,key,val,file) *
     RET(1, 4);
 }
 
+/* ---- the Win16 _l* file family (an HFILE is our file HANDLE) ---- */
+static uint32_t lopen_common(const char *name, int fl, int create) {
+    char path[1024];
+    hle_host_path(name, path, sizeof path);
+    int fd = open(path, fl | O_CLOEXEC | (create ? (O_CREAT | O_TRUNC) : 0), 0644);
+    if (hle_filetrace()) fprintf(stderr, "[file] _lopen \"%s\" -> %s %s\n", name, path, fd >= 0 ? "ok" : strerror(errno));
+    if (fd < 0) { hle_set_last_error(errno_to_win(errno)); return INVALID_HANDLE; }
+    return new_file(fd);
+}
+static void k__lopen(void) {                             /* (path, mode) OF_READ 0 / OF_WRITE 1 / OF_READWRITE 2 */
+    uint32_t m = A32(1);
+    RET(lopen_common(ASTR(0), m == 1 ? O_WRONLY : m == 2 ? O_RDWR : O_RDONLY, 0), 2);
+}
+static void k__lcreat(void) { RET(lopen_common(ASTR(0), O_RDWR, 1), 2); }   /* (path, attr) */
+static void k__lread(void) {
+    int fd = fd_of(A32(0)); if (fd < 0) RET(INVALID_HANDLE, 3);
+    ssize_t r = read(fd, APTR(1), A32(2));
+    RET(r < 0 ? INVALID_HANDLE : (uint32_t)r, 3);
+}
+static void k__lwrite(void) {
+    int fd = fd_of(A32(0)); if (fd < 0) RET(INVALID_HANDLE, 3);
+    ssize_t w = write(fd, APTR(1), A32(2));
+    RET(w < 0 ? INVALID_HANDLE : (uint32_t)w, 3);
+}
+static void k__lclose(void) { hle_handle_close(A32(0)); RET(0, 1); }
+static void k__llseek(void) {                            /* (hf, off, origin) */
+    int fd = fd_of(A32(0)); if (fd < 0) RET(INVALID_HANDLE, 3);
+    int o = (int)A32(2);
+    off_t p = lseek(fd, (int32_t)A32(1), o == 1 ? SEEK_CUR : o == 2 ? SEEK_END : SEEK_SET);
+    RET(p < 0 ? INVALID_HANDLE : (uint32_t)p, 3);
+}
+
+/* GetFullPathNameA(name, buflen, buf, &filePart): a lexical absolute path (no
+ * disk access). Relative names are taken against the current directory; the
+ * result keeps whatever separators it had, which hle_path matches on either. */
+static void k_GetFullPathNameA(void) {
+    const char *name = ASTR(0);
+    char abs[1024];
+    if (name && (name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':')))
+        snprintf(abs, sizeof abs, "%s", name);
+    else { char cwd[768]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(abs, sizeof abs, "%s/%s", cwd, name ? name : ""); }
+    char *buf = ASTR(2); uint32_t n = A32(1);
+    if (buf && n) { strncpy(buf, abs, n - 1); buf[n - 1] = 0; }
+    if (A32(3) && buf) {
+        char *bs = strrchr(buf, '\\'), *fs = strrchr(buf, '/'), *p = bs > fs ? bs : fs;
+        MEM32(A32(3)) = H2G(p ? p + 1 : buf);
+    }
+    RET(buf ? (uint32_t)strlen(buf) : (uint32_t)strlen(abs), 4);
+}
+
 const win32hle_shim win32hle_kernel32_ext[] = {
+    { "GetFullPathNameA", k_GetFullPathNameA },
+    { "_lopen", k__lopen }, { "_lcreat", k__lcreat }, { "_lread", k__lread },
+    { "_lwrite", k__lwrite }, { "_lclose", k__lclose }, { "_llseek", k__llseek },
     { "CreateFileA",                k_CreateFileA },
     { "ReadFile",                   k_ReadFile },
     { "WriteFile",                  k_WriteFile },
