@@ -284,6 +284,7 @@ extern void (*hle_screen_frame_hook)(const uint8_t *px, int w, int h, int pitch,
 extern int (*hle_screen_compose_hook)(const uint8_t *px16, int pitch, int w, int h, uint32_t *out);   /* a 2x picture */
 extern int (*hle_screen_view_hook)(int src[4], int dst[4]);   /* a zoom: the frame's src shown in its dst, the mouse mapped back; 0: none */
 extern void (*hle_screen_wheel_hook)(float dy, int fx, int fy);   /* the scroll wheel (up > 0), at frame point fx, fy */
+extern void (*hle_screen_motion_hook)(int fx, int fy);   /* the cursor's frame point on motion, before the zoom's mapping */
 int  hle_screen_scale(const char *name);   /* sharp, smooth, crt, nearest, integer: 0 if unknown */
 void hle_screen_bars(int blur);            /* the bars beside the picture: a blur of it, or black */
 extern void (*hle_screen_settings_hook)(const char *scale, int bars, int fullscreen);   /* F11/F12 changed them */

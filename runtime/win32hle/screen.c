@@ -74,6 +74,7 @@ static size_t g_hd_n;
  * to the host with the frame point under the cursor (before that mapping). */
 int (*hle_screen_view_hook)(int src[4], int dst[4]);
 void (*hle_screen_wheel_hook)(float dy, int fx, int fy);
+void (*hle_screen_motion_hook)(int fx, int fy);
 
 static int vk_of(SDL_Scancode s) {
     if (s >= SDL_SCANCODE_A && s <= SDL_SCANCODE_Z) return 'A' + (s - SDL_SCANCODE_A);
@@ -431,6 +432,11 @@ void hle_screen_pump(void) {
         }
         case SDL_MOUSEMOTION: {
             int gx, gy;
+            if (hle_screen_motion_hook) {
+                int fx, fy;
+                to_frame(e.motion.x, e.motion.y, &fx, &fy, 0);
+                hle_screen_motion_hook(fx, fy);
+            }
             to_game(e.motion.x, e.motion.y, &gx, &gy);
             hle_input_mouse(WM_MOUSEMOVE, gx, gy);
             break;
