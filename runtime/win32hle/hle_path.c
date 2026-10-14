@@ -42,6 +42,69 @@ static const char *drive_root(int i) {
 /* Append one component to out (which holds an existing directory, or ""
  * for the cwd), matching it without case if it is not there as spelled.
  * Returns 1 if the result exists. */
+/* The names of a directory, for the case-insensitive match: read once and
+ * kept until the directory's mtime changes, because the game asks the disk
+ * for thousands of files that are not there before it reads them from its
+ * MIX files, and an asset pack's layer holds 5,000 files: a readdir per
+ * miss cost 42 s at a skirmish's start. */
+#define DIR_CACHE 64
+typedef struct { char *path; time_t mtime; char **names; int n; } dir_cache_t;
+static dir_cache_t g_dirs[DIR_CACHE];
+static int g_ndirs, g_dirs_next;
+
+static int name_cmp(const void *a, const void *b) { return strcasecmp(*(char *const *)a, *(char *const *)b); }
+
+static void dir_cache_free(dir_cache_t *c) {
+    for (int i = 0; i < c->n; i++) free(c->names[i]);
+    free(c->names), free(c->path);
+    memset(c, 0, sizeof *c);
+}
+
+static int dir_cache_fill(dir_cache_t *c, const char *dir, time_t mtime) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int cap = 256;
+    c->path = strdup(dir);
+    c->names = (char **)malloc(sizeof(char *) * (size_t)cap);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (c->n == cap) cap *= 2, c->names = (char **)realloc(c->names, sizeof(char *) * (size_t)cap);
+        c->names[c->n++] = strdup(e->d_name);
+    }
+    closedir(d);
+    qsort(c->names, (size_t)c->n, sizeof(char *), name_cmp);
+    c->mtime = mtime;
+    return 1;
+}
+
+static dir_cache_t *dir_cache_get(const char *dir) {
+    struct stat st;
+    if (stat(dir, &st) != 0) return NULL;
+    dir_cache_t *c = NULL;
+    for (int i = 0; i < g_ndirs && !c; i++)
+        if (g_dirs[i].path && !strcmp(g_dirs[i].path, dir)) c = &g_dirs[i];
+    if (c && c->mtime == st.st_mtime) return c;
+    if (!c) {                                            /* a new slot, or the oldest when full */
+        if (g_ndirs < DIR_CACHE) c = &g_dirs[g_ndirs++];
+        else c = &g_dirs[g_dirs_next], g_dirs_next = (g_dirs_next + 1) % DIR_CACHE;
+    }
+    dir_cache_free(c);
+    return dir_cache_fill(c, dir, st.st_mtime) ? c : NULL;
+}
+
+/* The directory's entry that is want without case, or NULL. */
+static const char *dir_find(const char *dir, const char *want) {
+    dir_cache_t *c = dir_cache_get(dir);
+    if (!c) return NULL;
+    int lo = 0, hi = c->n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2, r = strcasecmp(c->names[mid], want);
+        if (!r) return c->names[mid];
+        if (r < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
+}
+
 static int join_component(char *out, size_t n, const char *comp, size_t clen) {
     size_t len = strlen(out);
     if (clen == 1 && comp[0] == '.') return 1;
@@ -60,15 +123,9 @@ static int join_component(char *out, size_t n, const char *comp, size_t clen) {
     struct stat st;
     if (lstat(out[0] ? out : ".", &st) == 0) return 1;
     out[len] = 0;
-    DIR *d = opendir(len ? out : ".");
-    int found = 0;
-    if (d) {
-        struct dirent *e;
-        while ((e = readdir(d)))
-            if (!strcasecmp(e->d_name, want)) { snprintf(out + len, n - len, "%s%s", sep, e->d_name); found = 1; break; }
-        closedir(d);
-    }
-    if (!found) snprintf(out + len, n - len, "%s%s", sep, want);
+    const char *hit = dir_find(len ? out : ".", want);
+    int found = hit != NULL;
+    snprintf(out + len, n - len, "%s%s", sep, found ? hit : want);
     return found;
 }
 
@@ -84,7 +141,7 @@ static int join_component(char *out, size_t n, const char *comp, size_t clen) {
  * pack's built sprites): reads look in the mod's layer, then each read-only
  * layer in the order added, then the game's folder. Writes never go to a
  * read-only layer: to the mod's when there is one, else the game's folder. */
-#define MAX_LAYERS 4
+#define MAX_LAYERS 16
 static char *g_overlay_base;
 static char *g_layers[MAX_LAYERS];     /* [0] the writable one (a mod), or NULL; then read-only */
 static int g_nlayers;

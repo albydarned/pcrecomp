@@ -395,7 +395,7 @@ static void k_CopyFileA(void) {                          /* (src, dst, failIfExi
 /* A directory search. Under an overlay it lists each layer's directory
  * first (the mod's, then the read-only ones), then the game's, without the
  * names an earlier one had. */
-#define FIND_DIRS 5
+#define FIND_DIRS 17   /* the game's folder and up to MAX_LAYERS layers (hle_path.c) */
 typedef struct {
     DIR *d[FIND_DIRS];                 /* the layers, then the game's; NULL once read through */
     char dir[FIND_DIRS][1024], mask[260];

@@ -100,7 +100,10 @@ int hle_dd_frame(const uint8_t **px, int *w, int *h, int *pitch, int *bpp, const
 /* A surface object's pixels, for a host that reads the game's surfaces
  * (an HD layer, a recorder): 0 if obj is not one of ours. */
 int hle_dd_surface_pixels(uint32_t obj, uint8_t **px, int *w, int *h, int *pitch, int *bpp) {
-    if (!obj || !g_vt_surf || MEM32(obj) != g_vt_surf) return 0;
+    /* obj is whatever the caller found in a game object's slot: a surface of
+     * ours, or (a sidebar BSurface's) a flag such as 1. Below 64 KB nothing
+     * is mapped, and an object is aligned, so neither is read. */
+    if (obj < 0x10000 || (obj & 3) || !g_vt_surf || MEM32(obj) != g_vt_surf) return 0;
     surf_t *s = S(obj);
     *px = s->px, *w = s->w, *h = s->h, *pitch = s->pitch, *bpp = s->bpp;
     return 1;
