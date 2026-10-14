@@ -75,6 +75,11 @@ static size_t g_hd_n;
 int (*hle_screen_view_hook)(int src[4], int dst[4]);
 void (*hle_screen_wheel_hook)(float dy, int fx, int fy);
 void (*hle_screen_motion_hook)(int fx, int fy);
+int (*hle_screen_crop_hook)(const uint8_t *px16, int pitch, int w, int h, const int src[4], uint32_t *out);
+static uint32_t *g_crop;                                 /* the crop at 4x, and its texture */
+static size_t g_crop_n;
+static SDL_Texture *g_ctex;
+static int g_ctex_w, g_ctex_h;
 
 static int vk_of(SDL_Scancode s) {
     if (s >= SDL_SCANCODE_A && s <= SDL_SCANCODE_Z) return 'A' + (s - SDL_SCANCODE_A);
@@ -262,8 +267,31 @@ static void present(void) {
         SDL_Rect to = { g_dst.x + (int)((long long)vdst[0] * g_dst.w / w), g_dst.y + (int)((long long)vdst[1] * g_dst.h / h), 0, 0 };
         to.w = g_dst.x + (int)((long long)(vdst[0] + vdst[2]) * g_dst.w / w) - to.x;
         to.h = g_dst.y + (int)((long long)(vdst[1] + vdst[3]) * g_dst.h / h) - to.y;
-        if (g_mode != 3 && g_mode != 4) SDL_SetTextureScaleMode(shown, SDL_ScaleModeLinear);
-        SDL_RenderCopy(g_ren, shown, &from, &to);
+        /* magnified 2x or more with HD on: the crop composed at 4x (a 4x
+         * pack's own pixels), the cost of the 2x picture's quarter */
+        int cropped = 0;
+        if (hd && bpp == 16 && hle_screen_crop_hook && vsrc[2] * 2 <= vdst[2] && vsrc[2] > 0 && vsrc[3] > 0) {
+            size_t need = (size_t)vsrc[2] * 4 * vsrc[3] * 4;
+            if (g_crop_n < need) { free(g_crop); g_crop = (uint32_t *)malloc(need * 4); g_crop_n = g_crop ? need : 0; }
+            if (g_crop && hle_screen_crop_hook(px, pitch, w, h, vsrc, g_crop)) {
+                int cw = vsrc[2] * 4, chh = vsrc[3] * 4;
+                if (!g_ctex || g_ctex_w != cw || g_ctex_h != chh) {
+                    if (g_ctex) SDL_DestroyTexture(g_ctex);
+                    g_ctex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, cw, chh);
+                    g_ctex_w = cw, g_ctex_h = chh;
+                }
+                if (g_ctex) {
+                    SDL_UpdateTexture(g_ctex, NULL, g_crop, cw * 4);
+                    SDL_SetTextureScaleMode(g_ctex, g_mode == 3 || g_mode == 4 ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+                    SDL_RenderCopy(g_ren, g_ctex, NULL, &to);
+                    cropped = 1;
+                }
+            }
+        }
+        if (!cropped) {
+            if (g_mode != 3 && g_mode != 4) SDL_SetTextureScaleMode(shown, SDL_ScaleModeLinear);
+            SDL_RenderCopy(g_ren, shown, &from, &to);
+        }
     }
     if (g_mode == 2 && g_dst.h >= 2 * h) {                /* crt: the lower third of every game row darker */
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
