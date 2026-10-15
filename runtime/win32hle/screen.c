@@ -40,6 +40,10 @@ static SDL_Texture *g_tex;
 static int g_tex_w, g_tex_h, g_tex_fmt;
 static unsigned g_shown_seq = ~0u;
 static uint32_t g_last_present;
+static uint32_t g_last_pump;                             /* when the game last pumped: in its loop, or not */
+static unsigned g_stat_pump, g_stat_primary, g_stat_heard;
+static double g_stat_ms, g_stat_compose, g_stat_upload;   /* ms: the present whole, its compose, its upload */
+static int g_stat_box[2];                                /* the last upload's region, 1x pixels */   /* HLE_SCREEN_STATS: presents from the pump, from the primary hook, primary changes heard */
 static int g_headless, g_fullscreen;
 static SDL_Rect g_dst;                                   /* where the picture is in the window */
 static pthread_t g_video_thread;                         /* SDL's video calls stay on the thread that opened it */
@@ -79,6 +83,7 @@ int (*hle_screen_view_hook)(int src[4], int dst[4]);
 void (*hle_screen_wheel_hook)(float dy, int fx, int fy);
 void (*hle_screen_motion_hook)(int fx, int fy);
 int (*hle_screen_crop_hook)(const uint8_t *px16, int pitch, int w, int h, const int src[4], uint32_t *out);
+int hle_screen_dirty[4];
 int hle_screen_crop_wanted;                              /* this picture will show the crop (set before the compose) */
 static uint32_t *g_crop;                                 /* the crop at 4x, and its texture */
 static size_t g_crop_n;
@@ -191,6 +196,23 @@ static void present(void) {
     if (seq == g_shown_seq && now - g_last_present < 250) return;
     if (now - g_last_present < 15) return;
     g_shown_seq = seq, g_last_present = now;
+    {                                                    /* HLE_SCREEN_STATS=1: every 2 s, who presented how often, and what a present took */
+        static int on = -1;
+        static uint32_t since;
+        static unsigned n;
+        if (on < 0) on = getenv("HLE_SCREEN_STATS") != NULL, since = now;
+        if (on) {
+            if (now - since >= 2000) {
+                fprintf(stderr, "[screen] %.1f presents/s (%u pumps, %u presents as the game drew into the primary, %u changes heard); "
+                        "%.1f ms each: compose %.1f, upload %.1f (last %dx%d), the rest %.1f\n",
+                        n * 1000.0 / (now - since), g_stat_pump, g_stat_primary, g_stat_heard, n ? g_stat_ms / n : 0.0,
+                        n ? g_stat_compose / n : 0.0, n ? g_stat_upload / n : 0.0, g_stat_box[0], g_stat_box[1],
+                        n ? (g_stat_ms - g_stat_compose - g_stat_upload) / n : 0.0);
+                since = now, n = 0, g_stat_ms = g_stat_compose = g_stat_upload = 0, g_stat_pump = g_stat_primary = g_stat_heard = 0;
+            }
+            n++;
+        }
+    }
     if (hle_screen_frame_hook) hle_screen_frame_hook(px, w, h, pitch, bpp);
     if (!g_ren) return;
     int hd = 0;
@@ -201,17 +223,41 @@ static void present(void) {
     }
     if (bpp == 16 && hle_screen_compose_hook) {
         if (g_hd_n < (size_t)w * h * 4) { free(g_hd); g_hd_n = (size_t)w * h * 4; g_hd = (uint32_t *)malloc(g_hd_n * 4); }
+        hle_screen_dirty[2] = -1;                        /* a hook that does not say: all of it */
+        uint32_t t0 = hle_ticks_ms();
         hd = g_hd && hle_screen_compose_hook(px, pitch, w, h, g_hd);
+        g_stat_compose += (double)(hle_ticks_ms() - t0);
     }
     int fmt = bpp == 16 && !hd ? SDL_PIXELFORMAT_RGB565 : SDL_PIXELFORMAT_RGB888;
     int tw = hd ? 2 * w : w, th = hd ? 2 * h : h;
+    int fresh = 0;
     if (!g_tex || g_tex_w != tw || g_tex_h != th || g_tex_fmt != fmt) {
         if (g_tex) SDL_DestroyTexture(g_tex);
         g_tex = SDL_CreateTexture(g_ren, (Uint32)fmt, SDL_TEXTUREACCESS_STREAMING, tw, th);
         g_tex_w = tw, g_tex_h = th, g_tex_fmt = fmt;
+        fresh = 1;
     }
+    uint32_t t_up = hle_ticks_ms();
+    g_stat_box[0] = g_stat_box[1] = 0;
     if (hd) {
-        SDL_UpdateTexture(g_tex, NULL, g_hd, tw * 4);
+        /* The texture holds the last 2x picture whole, and the hook's
+         * buffer persists: only what the compose changed goes up (a
+         * cursor's worth, not the 2560x1440 picture's 59 MB). */
+        int dx = hle_screen_dirty[0], dy = hle_screen_dirty[1], dw = hle_screen_dirty[2], dh = hle_screen_dirty[3];
+        if (fresh || dw < 0 || dh < 0) {
+            SDL_UpdateTexture(g_tex, NULL, g_hd, tw * 4);
+            g_stat_box[0] = w, g_stat_box[1] = h;
+        } else if (dw > 0 && dh > 0) {
+            if (dx < 0) dw += dx, dx = 0;
+            if (dy < 0) dh += dy, dy = 0;
+            if (dx + dw > w) dw = w - dx;
+            if (dy + dh > h) dh = h - dy;
+            if (dw > 0 && dh > 0) {
+                SDL_Rect r = { 2 * dx, 2 * dy, 2 * dw, 2 * dh };
+                SDL_UpdateTexture(g_tex, &r, g_hd + (size_t)r.y * tw + r.x, tw * 4);
+                g_stat_box[0] = dw, g_stat_box[1] = dh;
+            }
+        }
     } else if (bpp == 8) {
         if (g_conv_n < (size_t)w * h) { free(g_conv); g_conv_n = (size_t)w * h; g_conv = (uint32_t *)malloc(g_conv_n * 4); }
         for (int y = 0; y < h; y++)
@@ -223,6 +269,7 @@ static void present(void) {
     } else {
         SDL_UpdateTexture(g_tex, NULL, px, pitch);
     }
+    g_stat_upload += (double)(hle_ticks_ms() - t_up);
     int ww, wh;
     SDL_GetRendererOutputSize(g_ren, &ww, &wh);
     if ((long long)ww * h > (long long)wh * w) g_dst.h = wh, g_dst.w = (int)((long long)wh * w / h);
@@ -325,6 +372,7 @@ static void present(void) {
         if (sf) SDL_FreeSurface(sf);
     }
     SDL_RenderPresent(g_ren);
+    g_stat_ms += (double)(hle_ticks_ms() - now);
 }
 
 /* Who shows the cursor. A DirectDraw game draws its own into the picture, so
@@ -507,6 +555,8 @@ void hle_screen_pump(void) {
         default: break;
         }
     }
+    g_last_pump = hle_ticks_ms();
+    g_stat_pump++;
     present();
 }
 
@@ -532,8 +582,17 @@ static void primary_changed(void) {
     static uint32_t last_events;
     if (!g_ren || !pthread_equal(pthread_self(), g_video_thread)) return;
     uint32_t now = hle_ticks_ms();
+    g_stat_heard++;
+    /* A game in its loop pumps every frame, and the pump shows the frame. A
+     * present from here too would show every change to the primary between
+     * two pumps (RA2 draws its cursor there, animated while it hovers): up to
+     * sixty a second, each a whole compose and upload on the game's thread.
+     * So only a game that has stopped pumping (a slide, a load, a movie) is
+     * shown from here. */
+    if (now - g_last_pump < 50) return;
     if (now - g_last_present < 15) return;
     if (now - last_events >= 100) SDL_PumpEvents(), last_events = now;
+    g_stat_primary++;
     present();
 }
 

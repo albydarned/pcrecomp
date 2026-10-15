@@ -288,6 +288,7 @@ extern void (*hle_screen_wheel_hook)(float dy, int fx, int fy);   /* the scroll 
 extern void (*hle_screen_motion_hook)(int fx, int fy);   /* the cursor's frame point on motion, before the zoom's mapping */
 /* The zoom's crop at 4x: fills out (4 * src[2] x 4 * src[3] BGRX) for the frame's rect src, or returns 0 (the 2x picture is scaled then). */
 extern int (*hle_screen_crop_hook)(const uint8_t *px16, int pitch, int w, int h, const int src[4], uint32_t *out);
+extern int hle_screen_dirty[4];   /* set by the compose hook: the region of out it changed (x, y, w, h in 1x pixels); w < 0 all of it, 0 none */
 extern int hle_screen_crop_wanted;   /* the picture being composed will show the crop: the 2x compose may skip what it covers */
 int  hle_screen_scale(const char *name);   /* sharp, smooth, crt, nearest, integer: 0 if unknown */
 void hle_screen_bars(int blur);            /* the bars beside the picture: a blur of it, or black */
