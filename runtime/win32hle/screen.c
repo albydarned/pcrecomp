@@ -79,6 +79,7 @@ int (*hle_screen_view_hook)(int src[4], int dst[4]);
 void (*hle_screen_wheel_hook)(float dy, int fx, int fy);
 void (*hle_screen_motion_hook)(int fx, int fy);
 int (*hle_screen_crop_hook)(const uint8_t *px16, int pitch, int w, int h, const int src[4], uint32_t *out);
+int hle_screen_crop_wanted;                              /* this picture will show the crop (set before the compose) */
 static uint32_t *g_crop;                                 /* the crop at 4x, and its texture */
 static size_t g_crop_n;
 static SDL_Texture *g_ctex;
@@ -193,6 +194,11 @@ static void present(void) {
     if (hle_screen_frame_hook) hle_screen_frame_hook(px, w, h, pitch, bpp);
     if (!g_ren) return;
     int hd = 0;
+    {                                                    /* will the crop be drawn? the compose may skip work under it */
+        int s4[4], d4[4];
+        hle_screen_crop_wanted = bpp == 16 && hle_screen_crop_hook && hle_screen_view_hook && hle_screen_view_hook(s4, d4)
+                                 && s4[2] > 0 && s4[2] * 2 <= d4[2];
+    }
     if (bpp == 16 && hle_screen_compose_hook) {
         if (g_hd_n < (size_t)w * h * 4) { free(g_hd); g_hd_n = (size_t)w * h * 4; g_hd = (uint32_t *)malloc(g_hd_n * 4); }
         hd = g_hd && hle_screen_compose_hook(px, pitch, w, h, g_hd);
